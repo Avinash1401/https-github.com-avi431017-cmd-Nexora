@@ -1,0 +1,6 @@
+{
+  "name": "NEXORA COIN — MINE THE FUTURE",
+  "description": "Next-generation luxury fintech cryptocurrency platform and virtual mining simulation demo featuring real-time market data, interactive 3D WebGL coin, virtual portfolio, and automated audio briefings.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

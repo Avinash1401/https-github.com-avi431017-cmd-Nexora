@@ -1,0 +1,112 @@
+@import "tailwindcss";
+
+@layer base {
+  :root {
+    --font-heading: 'Cinzel', serif;
+    --font-sans: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, sans-serif;
+    --font-mono: 'JetBrains Mono', monospace;
+  }
+
+  body {
+    font-family: var(--font-sans);
+    background-color: #07080B;
+    color: #F3F4F6;
+    overflow-x: hidden;
+  }
+
+  h1, h2, h3, .font-cinzel {
+    font-family: var(--font-heading);
+  }
+
+  .font-mono-num {
+    font-family: var(--font-mono);
+    font-feature-settings: "tnum" 1;
+  }
+}
+
+/* Custom scrollbars */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: #0B0D13;
+}
+::-webkit-scrollbar-thumb {
+  background: #2A261A;
+  border-radius: 9999px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #D4AF37;
+}
+
+/* Luxury gold gradients */
+.gold-gradient-text {
+  background: linear-gradient(135deg, #FFF3D6 0%, #ECC86A 35%, #D4AF37 70%, #997825 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+}
+
+.gold-gradient-border {
+  position: relative;
+  border: 1px solid rgba(212, 175, 55, 0.22);
+}
+
+.gold-gradient-border:hover {
+  border-color: rgba(212, 175, 55, 0.45);
+}
+
+.gold-glow {
+  box-shadow: 0 0 30px -5px rgba(212, 175, 55, 0.18);
+}
+
+.gold-glow-lg {
+  box-shadow: 0 0 50px -10px rgba(212, 175, 55, 0.28);
+}
+
+@keyframes shimmerSweep {
+  0% {
+    background-position: -200% -200%;
+  }
+  50% {
+    background-position: 200% 200%;
+  }
+  100% {
+    background-position: 200% 200%;
+  }
+}
+
+@keyframes pulseGlow {
+  0%, 100% {
+    opacity: 0.6;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 0.9;
+    transform: scale(1.03);
+  }
+}
+
+@keyframes coinSlowRotate {
+  0% {
+    transform: perspective(800px) rotateY(0deg);
+  }
+  50% {
+    transform: perspective(800px) rotateY(180deg);
+  }
+  100% {
+    transform: perspective(800px) rotateY(360deg);
+  }
+}
+
+.animate-coin-slow-rotate {
+  animation: coinSlowRotate 24s linear infinite;
+  transform-style: preserve-3d;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .animate-coin-slow-rotate {
+    animation: none !important;
+  }
+}
+

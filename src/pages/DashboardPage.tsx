@@ -1,6 +1,7 @@
-import React from 'react';
+import React, { useState, useEffect } from 'react';
 import { useApp } from '../context/AppContext';
 import { NexoraCoinLogo } from '../components/NexoraCoinLogo';
+import { fetchMyReferralSummary } from '../services/userService';
 import {
   Pickaxe,
   TrendingUp,
@@ -13,6 +14,14 @@ import {
   Send,
   AlertCircle,
   CheckCircle2,
+  Gift,
+  Copy,
+  Check,
+  Layers,
+  Info,
+  ChevronRight,
+  RefreshCw,
+  UserCheck,
 } from 'lucide-react';
 import {
   AreaChart,
@@ -40,9 +49,66 @@ export const DashboardPage: React.FC = () => {
     marketStatus,
   } = useApp();
 
+  const [copiedRef, setCopiedRef] = useState(false);
+  const [claimFeedback, setClaimFeedback] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
+  const [isClaiming, setIsClaiming] = useState(false);
+  const [referralSummary, setReferralSummary] = useState<{
+    referralCode?: string;
+    totalReferrals: number;
+    totalRewardNXR: number;
+    maxReferrals: number;
+  }>({
+    referralCode: user?.referralCode,
+    totalReferrals: 0,
+    totalRewardNXR: 0,
+    maxReferrals: 10,
+  });
+
   const countdown = formatCountdown(miningSession.remainingSeconds);
   const userNXRBalance = user?.virtualBalanceNXR || 0.0;
-  const btcCoin = coins.find(c => c.symbol === 'BTC');
+
+  // Load referral summary
+  useEffect(() => {
+    if (!user?.id) return;
+    fetchMyReferralSummary(user.id).then(res => {
+      if (res.success) {
+        setReferralSummary({
+          referralCode: res.referralCode || user.referralCode,
+          totalReferrals: res.totalReferrals || 0,
+          totalRewardNXR: res.totalRewardNXR || 0,
+          maxReferrals: res.maxReferrals || 10,
+        });
+      }
+    }).catch(() => {});
+  }, [user?.id, user?.referralCode]);
+
+  const handleClaim = async () => {
+    setIsClaiming(true);
+    setClaimFeedback(null);
+    const result = await claimMiningReward();
+    setIsClaiming(false);
+
+    if (result.success) {
+      setClaimFeedback({
+        type: 'success',
+        text: `Successfully claimed +${formatNXR(result.rewardNXR || 0)} NXR to your virtual wallet!`,
+      });
+      setTimeout(() => setClaimFeedback(null), 5000);
+    } else {
+      setClaimFeedback({
+        type: 'error',
+        text: result.error || 'Failed to claim rewards.',
+      });
+      setTimeout(() => setClaimFeedback(null), 5000);
+    }
+  };
+
+  const copyReferralCode = () => {
+    const code = referralSummary.referralCode || user?.referralCode || `NXR-REF-${user?.id?.substring(4, 9).toUpperCase()}`;
+    navigator.clipboard.writeText(code);
+    setCopiedRef(true);
+    setTimeout(() => setCopiedRef(false), 2000);
+  };
 
   // 24-Hour Accumulation Curve Data (0h: 0.00000 -> 24h: 0.00024 NXR)
   const accumulationChartData = [
@@ -90,6 +156,14 @@ export const DashboardPage: React.FC = () => {
           </button>
 
           <button
+            onClick={() => setActiveTab('transactions')}
+            className="flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-[#171A27] text-slate-200 border border-slate-700 hover:border-[#D4AF37]/40 text-xs font-medium transition-all"
+          >
+            <Layers className="w-3.5 h-3.5 text-[#ECC86A]" />
+            <span>Transaction Center</span>
+          </button>
+
+          <button
             onClick={() => setActiveTab('wallet')}
             className="flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-[#171A27] text-slate-200 border border-slate-700 hover:border-[#D4AF37]/40 text-xs font-medium transition-all"
           >
@@ -107,6 +181,35 @@ export const DashboardPage: React.FC = () => {
         </div>
       </div>
 
+      {/* Mandatory Virtual Simulation Disclaimer Notice */}
+      <div className="p-4 rounded-2xl bg-[#0F111A] border border-[#D4AF37]/35 text-xs text-slate-300 space-y-1.5 shadow-lg">
+        <div className="flex items-center gap-2 text-[#ECC86A] font-semibold text-xs">
+          <Info className="w-4 h-4 text-[#ECC86A] shrink-0" />
+          <span className="font-cinzel tracking-wider uppercase">Platform Transparency Notice</span>
+        </div>
+        <p className="text-[11px] text-slate-300 leading-relaxed font-sans">
+          "NEXORA COIN is currently a virtual simulation. NXR balances and transfers are internal database records, not blockchain assets. No real-money value is guaranteed."
+        </p>
+      </div>
+
+      {/* Claim Feedback Banner */}
+      {claimFeedback && (
+        <div
+          className={`p-3.5 rounded-2xl text-xs flex items-center gap-2.5 animate-fadeIn ${
+            claimFeedback.type === 'success'
+              ? 'bg-emerald-500/15 border border-emerald-500/35 text-emerald-300'
+              : 'bg-rose-500/15 border border-rose-500/35 text-rose-300'
+          }`}
+        >
+          {claimFeedback.type === 'success' ? (
+            <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
+          ) : (
+            <AlertCircle className="w-4 h-4 text-rose-400 shrink-0" />
+          )}
+          <span>{claimFeedback.text}</span>
+        </div>
+      )}
+
       {/* 2. Top Summary KPI Metrics Cards (Strictly genuine balances) */}
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
         {/* Card 1: Virtual NXR Balance */}
@@ -122,7 +225,7 @@ export const DashboardPage: React.FC = () => {
           </div>
           <p className="text-[11px] text-slate-500 mt-2 flex items-center gap-1">
             <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" />
-            Internal Virtual Asset • No monetary value
+            Internal Virtual Asset • Authoritative DB Record
           </p>
         </div>
 
@@ -174,6 +277,98 @@ export const DashboardPage: React.FC = () => {
           <p className="text-[11px] text-slate-500 mt-2">
             Genuine claimed rewards only
           </p>
+        </div>
+      </div>
+
+      {/* 2B. Referral Summary & Account Status Row */}
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+        {/* Referral Program Summary */}
+        <div className="p-5 rounded-3xl bg-[#0C0E16] border border-[#D4AF37]/30 shadow-xl space-y-4">
+          <div className="flex items-center justify-between pb-3 border-b border-slate-800">
+            <h3 className="font-cinzel text-sm font-bold text-white flex items-center gap-2">
+              <Gift className="w-4 h-4 text-[#ECC86A]" />
+              Community Referral Network
+            </h3>
+            <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-[#181B26] text-[#ECC86A] border border-[#D4AF37]/30">
+              0.00005 NXR / Node
+            </span>
+          </div>
+
+          <div className="grid grid-cols-2 gap-3 text-xs">
+            <div className="p-3 rounded-2xl bg-[#08090E] border border-slate-800">
+              <span className="text-[10px] text-slate-400 block mb-1">Invited Nodes</span>
+              <span className="font-mono text-xl font-bold text-white">
+                {referralSummary.totalReferrals}{' '}
+                <span className="text-xs text-slate-500 font-normal">/ {referralSummary.maxReferrals} max</span>
+              </span>
+            </div>
+            <div className="p-3 rounded-2xl bg-[#08090E] border border-slate-800">
+              <span className="text-[10px] text-slate-400 block mb-1">Referral Rewards</span>
+              <span className="font-mono text-xl font-bold text-emerald-400">
+                +{formatNXR(referralSummary.totalRewardNXR)}
+              </span>
+            </div>
+          </div>
+
+          <div className="flex items-center gap-2 p-2.5 rounded-2xl bg-[#08090E] border border-slate-800 text-xs font-mono">
+            <span className="text-slate-400 font-sans text-[11px]">Your Referral Code:</span>
+            <span className="text-[#F3E5AB] font-bold flex-1 truncate">
+              {referralSummary.referralCode || user?.referralCode || 'NXR-REF-ACTIVE'}
+            </span>
+            <button
+              onClick={copyReferralCode}
+              className="flex items-center gap-1 px-2.5 py-1 rounded-lg bg-[#141724] hover:bg-[#1D2133] text-slate-200 hover:text-white border border-slate-700 text-[11px] font-sans transition-colors"
+            >
+              {copiedRef ? <Check className="w-3 h-3 text-emerald-400" /> : <Copy className="w-3 h-3" />}
+              <span>{copiedRef ? 'Copied' : 'Copy'}</span>
+            </button>
+          </div>
+        </div>
+
+        {/* Account Status Card */}
+        <div className="p-5 rounded-3xl bg-[#0C0E16] border border-[#D4AF37]/30 shadow-xl space-y-4 flex flex-col justify-between">
+          <div>
+            <div className="flex items-center justify-between pb-3 border-b border-slate-800">
+              <h3 className="font-cinzel text-sm font-bold text-white flex items-center gap-2">
+                <UserCheck className="w-4 h-4 text-[#ECC86A]" />
+                Node Verification & Account Status
+              </h3>
+              <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-emerald-500/15 text-emerald-300 border border-emerald-500/35">
+                ● Active
+              </span>
+            </div>
+
+            <div className="grid grid-cols-2 gap-3 text-xs mt-3">
+              <div className="p-3 rounded-2xl bg-[#08090E] border border-slate-800">
+                <span className="text-[10px] text-slate-400 block mb-1">Account Role</span>
+                <span className="font-mono text-base font-bold text-[#ECC86A] uppercase">
+                  {user?.role || 'user'}
+                </span>
+              </div>
+              <div className="p-3 rounded-2xl bg-[#08090E] border border-slate-800">
+                <span className="text-[10px] text-slate-400 block mb-1">Ledger Integrity</span>
+                <span className="font-mono text-base font-bold text-emerald-400">
+                  Integer Verified
+                </span>
+              </div>
+            </div>
+          </div>
+
+          <div className="flex items-center justify-between pt-2 border-t border-slate-800 text-xs">
+            <span className="text-slate-400">
+              Registered:{' '}
+              <span className="text-slate-200 font-mono">
+                {user?.registeredAt ? new Date(user.registeredAt).toLocaleDateString() : 'Active Node'}
+              </span>
+            </span>
+            <button
+              onClick={() => setActiveTab('account')}
+              className="text-[#ECC86A] hover:underline font-medium text-xs flex items-center gap-1"
+            >
+              <span>Security Settings</span>
+              <ChevronRight className="w-3.5 h-3.5" />
+            </button>
+          </div>
         </div>
       </div>
 
@@ -240,11 +435,11 @@ export const DashboardPage: React.FC = () => {
                   Pause Session
                 </button>
                 <button
-                  onClick={claimMiningReward}
-                  disabled={miningSession.accumulatedRewardNXR <= 0 || miningSession.claimed}
+                  onClick={handleClaim}
+                  disabled={miningSession.accumulatedRewardNXR <= 0 || miningSession.claimed || isClaiming}
                   className="px-6 py-3 rounded-xl bg-[#D4AF37] hover:bg-[#ECC86A] disabled:opacity-40 disabled:cursor-not-allowed text-black font-extrabold text-xs shadow transition-colors"
                 >
-                  Claim Mined Reward
+                  {isClaiming ? 'Claiming...' : 'Claim Mined Reward'}
                 </button>
               </>
             )}
@@ -399,18 +594,19 @@ export const DashboardPage: React.FC = () => {
         <div className="flex items-center justify-between pb-3 border-b border-slate-800">
           <div>
             <h3 className="font-cinzel text-lg font-bold text-white flex items-center gap-2">
-              <Wallet className="w-5 h-5 text-[#ECC86A]" />
-              Virtual Transaction Ledger
+              <Layers className="w-5 h-5 text-[#ECC86A]" />
+              Recent Ledger Transactions
             </h3>
             <p className="text-xs text-slate-400">
-              Genuine recorded demo transactions • No fabricated history.
+              Genuine recorded demo transactions • Authoritative internal database ledger
             </p>
           </div>
           <button
-            onClick={() => setActiveTab('wallet')}
-            className="text-xs text-[#ECC86A] hover:underline font-medium"
+            onClick={() => setActiveTab('transactions')}
+            className="text-xs text-[#ECC86A] hover:underline font-medium flex items-center gap-1"
           >
-            Open Wallet →
+            <span>Open Transaction Center</span>
+            <ChevronRight className="w-3.5 h-3.5" />
           </button>
         </div>
 
@@ -427,7 +623,7 @@ export const DashboardPage: React.FC = () => {
               <thead className="text-[11px] uppercase tracking-wider text-slate-500 border-b border-slate-800">
                 <tr>
                   <th className="py-2.5 px-3">Type</th>
-                  <th className="py-2.5 px-3">Hash</th>
+                  <th className="py-2.5 px-3">Reference</th>
                   <th className="py-2.5 px-3">Amount</th>
                   <th className="py-2.5 px-3">Timestamp</th>
                   <th className="py-2.5 px-3">Status</th>
@@ -445,11 +641,11 @@ export const DashboardPage: React.FC = () => {
                     <td className="py-3 px-3 text-white font-bold">
                       {formatNXR(tx.amount)}
                     </td>
-                    <td className="py-3 px-3 text-slate-400">
+                    <td className="py-3 px-3 text-slate-400 font-sans">
                       {new Date(tx.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
                     </td>
                     <td className="py-3 px-3">
-                      <span className="text-emerald-400 flex items-center gap-1 text-[11px]">
+                      <span className="text-emerald-400 flex items-center gap-1 text-[11px] font-sans">
                         <CheckCircle2 className="w-3.5 h-3.5" />
                         Completed
                       </span>

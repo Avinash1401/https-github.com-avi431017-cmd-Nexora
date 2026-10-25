@@ -18,6 +18,9 @@ import {
   User,
   LogOut,
   Sparkles,
+  Coins,
+  Trophy,
+  Layers,
 } from 'lucide-react';
 import { NexoraLogo } from '../NexoraLogo';
 
@@ -55,9 +58,12 @@ export const Navbar: React.FC<NavbarProps> = ({ onOpenDbModal }) => {
       icon: Pickaxe,
       badge: miningSession.isActive ? 'Active' : undefined,
     },
+    { id: 'wallet', label: 'Wallet', icon: Wallet },
+    { id: 'transactions', label: 'Ledger', icon: Layers },
+    { id: 'tokenomics', label: 'Tokenomics', icon: Coins },
+    { id: 'leaderboard', label: 'Leaderboard', icon: Trophy },
     { id: 'market', label: 'Markets', icon: TrendingUp },
     { id: 'portfolio', label: 'Portfolio', icon: PieChart },
-    { id: 'wallet', label: 'Wallet', icon: Wallet },
     { id: 'watchlist', label: 'Watchlist', icon: Star },
     { id: 'admin', label: 'Admin', icon: Shield, badge: 'Prototype' },
   ];
@@ -263,14 +269,27 @@ export const Navbar: React.FC<NavbarProps> = ({ onOpenDbModal }) => {
                       <div className="py-2 space-y-1">
                         <button
                           onClick={() => {
-                            setActiveTab('admin');
+                            setActiveTab('account');
                             setIsUserMenuOpen(false);
                           }}
                           className="w-full text-left px-2 py-1.5 rounded-lg text-xs text-slate-300 hover:text-white hover:bg-white/5 flex items-center justify-between"
                         >
                           <span className="flex items-center gap-2">
-                            <Shield className="w-3.5 h-3.5 text-[#ECC86A]" />
-                            <span>Admin Console</span>
+                            <User className="w-3.5 h-3.5 text-[#ECC86A]" />
+                            <span>Account & Security</span>
+                          </span>
+                          <ChevronRight className="w-3.5 h-3.5 text-slate-500" />
+                        </button>
+                        <button
+                          onClick={() => {
+                            setActiveTab('transactions');
+                            setIsUserMenuOpen(false);
+                          }}
+                          className="w-full text-left px-2 py-1.5 rounded-lg text-xs text-slate-300 hover:text-white hover:bg-white/5 flex items-center justify-between"
+                        >
+                          <span className="flex items-center gap-2">
+                            <Layers className="w-3.5 h-3.5 text-[#ECC86A]" />
+                            <span>Transaction Center</span>
                           </span>
                           <ChevronRight className="w-3.5 h-3.5 text-slate-500" />
                         </button>
@@ -287,6 +306,21 @@ export const Navbar: React.FC<NavbarProps> = ({ onOpenDbModal }) => {
                           </span>
                           <ChevronRight className="w-3.5 h-3.5 text-slate-500" />
                         </button>
+                        {user.role === 'admin' && (
+                          <button
+                            onClick={() => {
+                              setActiveTab('admin');
+                              setIsUserMenuOpen(false);
+                            }}
+                            className="w-full text-left px-2 py-1.5 rounded-lg text-xs text-slate-300 hover:text-white hover:bg-white/5 flex items-center justify-between"
+                          >
+                            <span className="flex items-center gap-2">
+                              <Shield className="w-3.5 h-3.5 text-[#ECC86A]" />
+                              <span>Admin Console</span>
+                            </span>
+                            <ChevronRight className="w-3.5 h-3.5 text-slate-500" />
+                          </button>
+                        )}
                       </div>
 
                       <div className="pt-2 border-t border-slate-800">

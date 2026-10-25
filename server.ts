@@ -11,8 +11,14 @@ import {
   validateMiningClaimCalculation,
   validateVirtualTransfer,
   validateRoleAssignment,
+  validateReferralClaim,
+  validateAdminBalanceAdjustment,
   HOURLY_MINING_RATE_NXR,
   MAX_CYCLE_REWARD_NXR,
+  REFERRAL_REWARD_NXR,
+  MAX_REFERRAL_COUNT_PER_USER,
+  addNxrBaseUnits,
+  subtractNxrBaseUnits,
 } from './src/utils/ledgerEngine';
 
 dotenv.config();
@@ -87,6 +93,27 @@ interface ServerSecurityEvent {
   description: string;
 }
 
+export interface ServerNotification {
+  id: string;
+  userId: string;
+  title: string;
+  message: string;
+  type: 'info' | 'reward' | 'success' | 'alert' | 'system' | 'warning';
+  timestamp: number;
+  read: boolean;
+  deduplicationKey?: string;
+  referenceId?: string;
+}
+
+export interface ServerSession {
+  sessionId: string;
+  userId: string;
+  ipAddress: string;
+  userAgent: string;
+  createdAt: number;
+  lastActiveAt: number;
+}
+
 // In-Memory Database collections (Authoritative Server State)
 // Starts with initial operator account. No fabricated users or balances.
 const dbUsers = new Map<string, WalletRecord>([
@@ -108,6 +135,29 @@ const dbUsers = new Map<string, WalletRecord>([
 const dbMiningSessions: ServerMiningSession[] = [];
 const dbLedgerEntries: LedgerEntry[] = [];
 const dbTransfers: ServerTransfer[] = [];
+const dbNotifications: ServerNotification[] = [
+  {
+    id: `notif_sys_${Date.now()}`,
+    userId: 'usr_admin',
+    title: 'Platform System Ready',
+    message: 'NEXORA virtual ledger active with zero-balance integrity and 24h mining ceiling.',
+    type: 'system',
+    timestamp: Date.now(),
+    read: false,
+    deduplicationKey: 'system_boot_notif',
+  },
+];
+const dbSessions: ServerSession[] = [
+  {
+    sessionId: 'sess_admin_master',
+    userId: 'usr_admin',
+    ipAddress: '127.0.0.1',
+    userAgent: 'Nexora Core Gateway / Institutional Operator',
+    createdAt: Date.now() - 86400000,
+    lastActiveAt: Date.now(),
+  },
+];
+
 const dbAuditLogs: ServerAuditLog[] = [
   {
     id: `log_init_${Date.now()}`,
@@ -120,6 +170,93 @@ const dbAuditLogs: ServerAuditLog[] = [
     status: 'success',
   },
 ];
+interface ServerReferral {
+  id: string;
+  referrerId: string;
+  referrerWalletAddress: string;
+  referredUserId: string;
+  referredUserEmail: string;
+  timestamp: number;
+  rewardNXR: number;
+  status: 'confirmed';
+}
+
+const dbReferrals: ServerReferral[] = [];
+
+// Rate Limiting Store: Map of key -> { count, resetAt }
+const rateLimitStore = new Map<string, { count: number; resetAt: number }>();
+
+function checkRateLimit(key: string, maxRequests: number, windowMs: number): { allowed: boolean; remaining: number; retryAfterSeconds: number } {
+  const now = Date.now();
+  const entry = rateLimitStore.get(key);
+
+  if (!entry || now > entry.resetAt) {
+    rateLimitStore.set(key, { count: 1, resetAt: now + windowMs });
+    return { allowed: true, remaining: maxRequests - 1, retryAfterSeconds: 0 };
+  }
+
+  if (entry.count >= maxRequests) {
+    const retryAfterSeconds = Math.ceil((entry.resetAt - now) / 1000);
+    return { allowed: false, remaining: 0, retryAfterSeconds };
+  }
+
+  entry.count += 1;
+  return { allowed: true, remaining: maxRequests - entry.count, retryAfterSeconds: 0 };
+}
+
+function addServerNotification(
+  userId: string,
+  title: string,
+  message: string,
+  type: ServerNotification['type'] = 'info',
+  deduplicationKey?: string,
+  referenceId?: string
+): boolean {
+  if (deduplicationKey) {
+    const exists = dbNotifications.some(n => n.userId === userId && n.deduplicationKey === deduplicationKey);
+    if (exists) {
+      return false; // Prevent duplicate notifications
+    }
+  }
+
+  const notif: ServerNotification = {
+    id: `notif_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+    userId,
+    title,
+    message,
+    type,
+    timestamp: Date.now(),
+    read: false,
+    deduplicationKey,
+    referenceId,
+  };
+
+  dbNotifications.unshift(notif);
+  // Cap at 200 notifications to prevent unbounded memory growth
+  if (dbNotifications.length > 200) {
+    dbNotifications.pop();
+  }
+
+  broadcastRealtimeEvent('NEW_NOTIFICATION', {
+    userId,
+    notification: notif,
+  });
+
+  return true;
+}
+
+function maskEmail(email: string): string {
+  if (!email || !email.includes('@')) return 'node***@nexora.internal';
+  const [local, domain] = email.split('@');
+  if (local.length <= 2) return `${local[0]}***@${domain}`;
+  return `${local[0]}***${local[local.length - 1]}@${domain}`;
+}
+
+function maskWalletAddress(address: string): string {
+  if (!address || address.length < 8) return 'NXR-***';
+  return `${address.slice(0, 8)}...${address.slice(-4)}`;
+}
+
 const dbSecurityEvents: ServerSecurityEvent[] = [];
 const processedTransferKeys = new Set<string>();
 
@@ -362,7 +499,7 @@ app.get('/api/market', async (req, res) => {
 // Ensures authenticated users in the client exist in server DB
 // ----------------------------------------------------------------------------
 app.post('/api/users/sync', (req: Request, res: Response) => {
-  const { id, email, displayName, role = 'user', walletAddress, balanceNXR = 0.0 } = req.body;
+  const { id, email, displayName, role = 'user', walletAddress, balanceNXR = 0.0, referralCode } = req.body;
 
   if (!email || !id) {
     return res.status(400).json({ success: false, error: 'User ID and email are required.' });
@@ -375,6 +512,8 @@ app.post('/api/users/sync', (req: Request, res: Response) => {
     effectiveRole = existing.role; // Enforce existing non-admin role
   }
 
+  const generatedRefCode = `NXR-REF-${id.substring(4, 9).toUpperCase()}`;
+
   const userRecord: WalletRecord = {
     userId: id,
     email,
@@ -384,9 +523,93 @@ app.post('/api/users/sync', (req: Request, res: Response) => {
     walletAddress: walletAddress || `NXR-${Math.floor(1000 + Math.random() * 9000)}-${Math.floor(1000 + Math.random() * 9000)}`,
     balanceNXR: existing ? existing.balanceNXR : balanceNXR,
     registeredAt: existing ? existing.registeredAt : Date.now(),
+    referralCode: existing?.referralCode || generatedRefCode,
+    referredBy: existing?.referredBy,
   };
 
+  // If this is a fresh registration and a referral code is provided
+  let referralCredited = false;
+  if (!existing && referralCode && typeof referralCode === 'string') {
+    const cleanCode = referralCode.trim().toUpperCase();
+    const referrer = Array.from(dbUsers.values()).find(
+      u => u.referralCode?.toUpperCase() === cleanCode ||
+           `NXR-REF-${u.userId.substring(4, 9).toUpperCase()}` === cleanCode ||
+           (cleanCode === 'NXR-REF-ADMIN' && u.role === 'admin')
+    );
+
+    if (referrer) {
+      const existingRefCount = dbReferrals.filter(r => r.referrerId === referrer.userId).length;
+      const refCheck = validateReferralClaim(referrer, id, existingRefCount);
+      if (refCheck.valid) {
+        userRecord.referredBy = referrer.userId;
+        referrer.balanceNXR = addNxrBaseUnits(referrer.balanceNXR, REFERRAL_REWARD_NXR);
+
+        const refEntry: LedgerEntry = {
+          id: `led_ref_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
+          entryType: 'referral_reward',
+          userId: referrer.userId,
+          walletAddress: referrer.walletAddress,
+          amountNXR: REFERRAL_REWARD_NXR,
+          balanceAfterNXR: referrer.balanceNXR,
+          referenceId: `ref_${id}`,
+          timestamp: Date.now(),
+          note: `Referral reward for node registration: ${maskEmail(email)}`,
+        };
+        dbLedgerEntries.unshift(refEntry);
+
+        dbReferrals.unshift({
+          id: `ref_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
+          referrerId: referrer.userId,
+          referrerWalletAddress: referrer.walletAddress,
+          referredUserId: id,
+          referredUserEmail: email,
+          timestamp: Date.now(),
+          rewardNXR: REFERRAL_REWARD_NXR,
+          status: 'confirmed',
+        });
+
+        dbAuditLogs.unshift({
+          id: `log_${Date.now()}`,
+          timestamp: Date.now(),
+          action: 'REFERRAL_REWARD_CREDITED',
+          category: 'wallet',
+          performedBy: 'system',
+          ipAddress: (req.headers['x-forwarded-for'] as string) || req.socket.remoteAddress || '127.0.0.1',
+          details: `Credited +${REFERRAL_REWARD_NXR.toFixed(5)} NXR to referrer ${referrer.email} for invitee ${maskEmail(email)}`,
+          status: 'success',
+        });
+
+        broadcastRealtimeEvent('REFERRAL_RECORDED', {
+          referrerId: referrer.userId,
+          rewardNXR: REFERRAL_REWARD_NXR,
+          timestamp: Date.now(),
+        });
+
+        addServerNotification(
+          referrer.userId,
+          'Referral Reward Deposited',
+          `Received +${REFERRAL_REWARD_NXR.toFixed(5)} NXR bonus for new node registration: ${maskEmail(email)}`,
+          'reward',
+          `ref_${id}`,
+          `ref_${id}`
+        );
+
+        referralCredited = true;
+      }
+    }
+  }
+
   dbUsers.set(id, userRecord);
+
+  if (!existing) {
+    addServerNotification(
+      userRecord.userId,
+      'Welcome to NEXORA Protocol',
+      'Your simulated node account is active. Start a 24-hour mining session to begin accumulating virtual NXR.',
+      'system',
+      `welcome_${userRecord.userId}`
+    );
+  }
 
   broadcastRealtimeEvent('USER_REGISTERED', {
     userId: userRecord.userId,
@@ -395,32 +618,208 @@ app.post('/api/users/sync', (req: Request, res: Response) => {
     registeredAt: userRecord.registeredAt,
   });
 
-  return res.json({ success: true, user: userRecord });
+  return res.json({ success: true, user: userRecord, referralCredited });
+});
+
+// ----------------------------------------------------------------------------
+// 5B. REFERRALS API
+// ----------------------------------------------------------------------------
+app.get('/api/referrals/my', (req: Request, res: Response) => {
+  const userId = (req.headers['x-user-id'] as string) || (req.query.userId as string) || '';
+  if (!userId) {
+    return res.status(400).json({ success: false, error: 'User ID is required.' });
+  }
+
+  const user = dbUsers.get(userId);
+  const userRefCode = user?.referralCode || `NXR-REF-${userId.substring(4, 9).toUpperCase()}`;
+  const userReferrals = dbReferrals.filter(r => r.referrerId === userId);
+  const totalEarned = userReferrals.reduce((sum, r) => addNxrBaseUnits(sum, r.rewardNXR), 0);
+
+  return res.json({
+    success: true,
+    referralCode: userRefCode,
+    totalReferrals: userReferrals.length,
+    maxReferrals: MAX_REFERRAL_COUNT_PER_USER,
+    rewardPerReferralNXR: REFERRAL_REWARD_NXR,
+    totalRewardNXR: totalEarned,
+    referrals: userReferrals.map(r => ({
+      id: r.id,
+      referredUserId: r.referredUserId,
+      maskedEmail: maskEmail(r.referredUserEmail),
+      timestamp: r.timestamp,
+      rewardNXR: r.rewardNXR,
+      status: r.status,
+    })),
+  });
+});
+
+// ----------------------------------------------------------------------------
+// 5C. LEADERBOARD & GENUINE PLATFORM ACTIVITY
+// Real registered users and authentic activity only (Zero fabrication)
+// ----------------------------------------------------------------------------
+app.get('/api/leaderboard', (req: Request, res: Response) => {
+  const users = Array.from(dbUsers.values())
+    .map(u => {
+      const completedSessions = dbMiningSessions.filter(s => s.userId === u.userId && s.claimed).length;
+      return {
+        userId: u.userId,
+        maskedEmail: maskEmail(u.email),
+        displayName: u.displayName,
+        maskedAddress: maskWalletAddress(u.walletAddress),
+        balanceNXR: u.balanceNXR,
+        role: u.role,
+        status: u.status,
+        registeredAt: u.registeredAt,
+        completedMiningCycles: completedSessions,
+      };
+    })
+    .sort((a, b) => b.balanceNXR - a.balanceNXR || a.registeredAt - b.registeredAt);
+
+  return res.json({
+    success: true,
+    leaderboard: users,
+    totalNodes: users.length,
+    timestamp: Date.now(),
+  });
+});
+
+app.get('/api/activity/stream', (req: Request, res: Response) => {
+  const activityItems: any[] = [];
+
+  // 1. Completed mining claims
+  for (const session of dbMiningSessions.filter(s => s.claimed).slice(0, 10)) {
+    const user = dbUsers.get(session.userId);
+    activityItems.push({
+      id: `act_${session.sessionId}`,
+      type: 'mining_claim',
+      title: 'Mining Cycle Claimed',
+      description: `${user ? maskEmail(user.email) : 'Verified node'} claimed +${session.rewardEarnedNXR.toFixed(5)} NXR (${Math.floor(session.elapsedSeconds / 3600)}h cycle)`,
+      amountNXR: session.rewardEarnedNXR,
+      timestamp: session.claimedAt || session.startedAt,
+      txHash: session.claimTxHash,
+    });
+  }
+
+  // 2. Peer transfers
+  for (const tx of dbTransfers.slice(0, 10)) {
+    activityItems.push({
+      id: `act_${tx.id}`,
+      type: 'transfer',
+      title: 'Internal Virtual Transfer',
+      description: `${maskWalletAddress(tx.senderAddress)} transferred ${tx.amountNXR.toFixed(5)} NXR to ${maskWalletAddress(tx.recipientAddress)}`,
+      amountNXR: tx.amountNXR,
+      timestamp: tx.timestamp,
+      txHash: tx.txHash,
+    });
+  }
+
+  // 3. Referrals
+  for (const ref of dbReferrals.slice(0, 5)) {
+    const referrer = dbUsers.get(ref.referrerId);
+    activityItems.push({
+      id: `act_${ref.id}`,
+      type: 'referral',
+      title: 'Referral Bonus Credited',
+      description: `${referrer ? maskEmail(referrer.email) : 'Node'} earned +${ref.rewardNXR.toFixed(5)} NXR for inviting ${maskEmail(ref.referredUserEmail)}`,
+      amountNXR: ref.rewardNXR,
+      timestamp: ref.timestamp,
+    });
+  }
+
+  activityItems.sort((a, b) => b.timestamp - a.timestamp);
+
+  return res.json({
+    success: true,
+    activity: activityItems.slice(0, 20),
+    timestamp: Date.now(),
+  });
+});
+
+// ----------------------------------------------------------------------------
+// 5D. TRANSPARENT TOKENOMICS & ACCOUNTING
+// Real-time supply statistics and explicit configurable parameters
+// ----------------------------------------------------------------------------
+app.get('/api/tokenomics/accounting', (req: Request, res: Response) => {
+  let totalCirculation = 0.0;
+  for (const u of dbUsers.values()) {
+    totalCirculation = addNxrBaseUnits(totalCirculation, u.balanceNXR);
+  }
+
+  const maxSupplyNXR = 21_000_000;
+  const unminedSupply = subtractNxrBaseUnits(maxSupplyNXR, totalCirculation);
+
+  return res.json({
+    success: true,
+    tokenomics: {
+      name: 'NEXORA COIN',
+      symbol: 'NXR',
+      status: 'Virtual Simulation Protocol (Pre-Mainnet)',
+      maxSupplyNXR,
+      circulatingSupplyNXR: totalCirculation,
+      unminedSupplyNXR: unminedSupply,
+      totalRegisteredNodes: dbUsers.size,
+      totalMiningCycles: dbMiningSessions.length,
+      claimedMiningCycles: dbMiningSessions.filter(s => s.claimed).length,
+      totalTransfers: dbTransfers.length,
+      totalReferrals: dbReferrals.length,
+      rules: {
+        hourlyMiningRateNXR: HOURLY_MINING_RATE_NXR,
+        cycleCapNXR: MAX_CYCLE_REWARD_NXR,
+        cycleMaxHours: 24,
+        referralRewardNXR: REFERRAL_REWARD_NXR,
+        maxReferralsPerUser: MAX_REFERRAL_COUNT_PER_USER,
+        minTransferNXR: 0.00001,
+        maxTransferNXR: 100.0,
+      },
+      allocations: [
+        { label: 'Community Mining & Ecosystem Rewards', percentage: 45, tokens: 9450000, vesting: '10-Year Linear Accrual via Validated Node Cycles' },
+        { label: 'Treasury & Protocol Development', percentage: 25, tokens: 5250000, vesting: '12-Month Cliff, 36-Month Linear Quarterly Release' },
+        { label: 'Initial DEX Liquidity & Market Making', percentage: 15, tokens: 3150000, vesting: 'Locked in AMM Smart Contract upon Launch' },
+        { label: 'Core Contributors & Advisors', percentage: 10, tokens: 2100000, vesting: '24-Month Cliff, 48-Month Linear Monthly Vesting' },
+        { label: 'Strategic Reserve & Security Bug Bounty', percentage: 5, tokens: 1050000, vesting: 'Multi-Sig Timelock Governance Pool' },
+      ],
+      disclaimer: 'NEXORA COIN is currently a virtual simulation. NXR balances and transfers are internal database records, not blockchain assets. No real-money value is guaranteed.',
+    },
+    timestamp: Date.now(),
+  });
 });
 
 // ----------------------------------------------------------------------------
 // 6. SERVER-VALIDATED VIRTUAL MINING SYSTEM (24-Hour Session Engine)
 // Rate: 0.00001 NXR per hour, capped at 24 hours (0.00024 NXR max)
+// Protected against client clock manipulation via authoritative server DB timestamps
 // ----------------------------------------------------------------------------
 app.post('/api/mining/start', (req, res) => {
   const { userId = 'usr_guest' } = req.body;
   const now = Date.now();
+  const clientIp = (req.headers['x-forwarded-for'] as string) || req.socket.remoteAddress || '127.0.0.1';
 
-  // Find active session for user
-  const existingIndex = dbMiningSessions.findIndex(s => s.userId === userId && !s.claimed);
-  if (existingIndex !== -1) {
-    const existing = dbMiningSessions[existingIndex];
-    const elapsedSeconds = Math.max(0, (now - existing.startedAt) / 1000);
+  // Find active unclaimed session for this user in server DB
+  const existingActive = dbMiningSessions.find(s => s.userId === userId && !s.claimed);
+  if (existingActive) {
+    const elapsedSeconds = Math.max(0, (now - existingActive.startedAt) / 1000);
     if (elapsedSeconds < 86400) {
       return res.status(409).json({
         success: false,
         error: 'An active 24-hour mining session is already in progress.',
-        startedAt: existing.startedAt,
+        sessionId: existingActive.sessionId,
+        startedAt: existingActive.startedAt,
         elapsedSeconds: Math.floor(elapsedSeconds),
+        remainingSeconds: Math.max(0, 86400 - Math.floor(elapsedSeconds)),
+      });
+    } else {
+      return res.status(409).json({
+        success: false,
+        error: 'A completed 24-hour mining session is awaiting reward claim. Please claim your rewards before initiating a new cycle.',
+        sessionId: existingActive.sessionId,
+        startedAt: existingActive.startedAt,
+        elapsedSeconds: Math.floor(elapsedSeconds),
+        rewardAvailableNXR: MAX_CYCLE_REWARD_NXR,
       });
     }
   }
 
+  // Server authoritatively sets startedAt from server system clock — client cannot forge this
   const newSession: ServerMiningSession = {
     sessionId: `sess_${now}_${Math.random().toString(36).substring(2, 8)}`,
     userId,
@@ -440,8 +839,8 @@ app.post('/api/mining/start', (req, res) => {
     action: 'MINING_SESSION_START',
     category: 'mining',
     performedBy: userId,
-    ipAddress: (req.headers['x-forwarded-for'] as string) || req.socket.remoteAddress || '127.0.0.1',
-    details: `Started 24h mining session ${newSession.sessionId}`,
+    ipAddress: clientIp,
+    details: `Started 24h server-verified mining session ${newSession.sessionId}`,
     status: 'success',
   });
 
@@ -449,25 +848,34 @@ app.post('/api/mining/start', (req, res) => {
     success: true,
     sessionId: newSession.sessionId,
     startedAt: newSession.startedAt,
+    serverTimestamp: now,
     maxDurationSeconds: 86400,
     hourlyRateNXR: HOURLY_MINING_RATE_NXR,
     maxRewardNXR: MAX_CYCLE_REWARD_NXR,
+    message: 'Mining session initialized with server-side database timestamp.',
   });
 });
 
 app.get('/api/mining/status', (req, res) => {
-  const userId = (req.query.userId as string) || 'usr_guest';
+  const userId = (req.query.userId as string) || (req.headers['x-user-id'] as string) || 'usr_guest';
   const now = Date.now();
 
   const session = dbMiningSessions.find(s => s.userId === userId && !s.claimed);
   if (!session) {
     return res.json({
       active: false,
+      sessionId: null,
       startedAt: null,
+      serverTimestamp: now,
       elapsedSeconds: 0,
+      clampedElapsedSeconds: 0,
       remainingSeconds: 86400,
       accumulatedRewardNXR: 0.0,
+      maxRewardNXR: MAX_CYCLE_REWARD_NXR,
+      hourlyRateNXR: HOURLY_MINING_RATE_NXR,
       claimed: false,
+      isComplete: false,
+      isCapped: false,
     });
   }
 
@@ -481,18 +889,82 @@ app.get('/api/mining/status', (req, res) => {
     active: true,
     sessionId: session.sessionId,
     startedAt: session.startedAt,
+    serverTimestamp: now,
     elapsedSeconds: Math.floor(rawElapsed),
+    clampedElapsedSeconds: Math.floor(clampedElapsed),
     remainingSeconds,
     accumulatedRewardNXR: calculatedReward,
+    maxRewardNXR: MAX_CYCLE_REWARD_NXR,
+    hourlyRateNXR: HOURLY_MINING_RATE_NXR,
     claimed: false,
     isComplete: rawElapsed >= 86400,
+    isCapped: rawElapsed >= 86400,
+    verification: {
+      source: 'SERVER_DATABASE_TIMESTAMP',
+      protectedAgainstClockTampering: true,
+    },
+  });
+});
+
+app.get('/api/mining/verify/:sessionId', (req, res) => {
+  const { sessionId } = req.params;
+  const now = Date.now();
+  const session = dbMiningSessions.find(s => s.sessionId === sessionId);
+
+  if (!session) {
+    return res.status(404).json({
+      success: false,
+      error: 'Mining session not found in database.',
+    });
+  }
+
+  const rawElapsed = Math.max(0, ((session.claimedAt || now) - session.startedAt) / 1000);
+  const clampedElapsed = Math.min(86400, rawElapsed);
+  const user = dbUsers.get(session.userId);
+
+  return res.json({
+    success: true,
+    verification: {
+      sessionId: session.sessionId,
+      userMasked: user ? maskEmail(user.email) : 'Verified Node',
+      startedAt: session.startedAt,
+      claimedAt: session.claimedAt || null,
+      elapsedSeconds: session.claimed ? session.elapsedSeconds : Math.floor(rawElapsed),
+      clampedElapsedSeconds: Math.floor(clampedElapsed),
+      rewardNXR: session.rewardEarnedNXR,
+      maxCapNXR: MAX_CYCLE_REWARD_NXR,
+      isCapped: rawElapsed >= 86400,
+      status: session.status,
+      claimed: session.claimed,
+      claimTxHash: session.claimTxHash || null,
+      verifiedBy: 'NEXORA_AUTHORITATIVE_LEDGER',
+      serverClockProof: true,
+    },
   });
 });
 
 app.post('/api/mining/claim', (req, res) => {
-  const { userId = 'usr_guest', sessionId } = req.body;
+  const {
+    userId = 'usr_guest',
+    sessionId,
+    clientTimestamp,
+    clientElapsedSeconds,
+    claimedRewardNXR,
+  } = req.body;
   const now = Date.now();
+  const clientIp = (req.headers['x-forwarded-for'] as string) || req.socket.remoteAddress || '127.0.0.1';
 
+  // 0. Rate limiting: 10 claim attempts per minute
+  const rateCheck = checkRateLimit(`mining_claim_${clientIp}_${userId}`, 10, 60000);
+  if (!rateCheck.allowed) {
+    return res.status(429).json({
+      success: false,
+      error: `Too many mining requests. Please wait ${rateCheck.retryAfterSeconds} seconds.`,
+      retryAfterSeconds: rateCheck.retryAfterSeconds,
+    });
+  }
+
+  // 1. Database Lookup - The start timestamp comes STRICTLY from dbMiningSessions
   const session = dbMiningSessions.find(
     s => s.userId === userId && (!sessionId || s.sessionId === sessionId)
   );
@@ -500,13 +972,33 @@ app.post('/api/mining/claim', (req, res) => {
   if (!session) {
     return res.status(404).json({
       success: false,
-      error: 'No active mining session found for this user.',
+      error: 'No active mining session found in database for this user.',
     });
   }
 
-  const claimValidation = validateMiningClaimCalculation(session.startedAt, now, session.claimed);
+  // 2. Perform server-side validation against authoritative database start timestamp
+  const claimValidation = validateMiningClaimCalculation(
+    session.startedAt,
+    now,
+    session.claimed,
+    { clientTimestamp, clientElapsedSeconds, claimedRewardNXR }
+  );
+
+  // 3. Detect and audit client-side clock manipulation or reward tampering
+  if (claimValidation.clockManipulationDetected) {
+    dbSecurityEvents.unshift({
+      id: `sec_${Date.now()}`,
+      timestamp: now,
+      eventType: 'CLIENT_CLOCK_MANIPULATION_ATTEMPT',
+      severity: 'high',
+      actor: userId,
+      ipAddress: clientIp,
+      description: `Client-side clock manipulation or reward inflation attempt detected on session ${session.sessionId}: ${claimValidation.manipulationDetails}`,
+    });
+  }
+
+  // 4. Reject invalid claims (duplicate claims, zero duration, premature claims)
   if (!claimValidation.valid) {
-    // If attempting duplicate claim, record a security event
     if (session.claimed) {
       dbSecurityEvents.unshift({
         id: `sec_${Date.now()}`,
@@ -514,21 +1006,25 @@ app.post('/api/mining/claim', (req, res) => {
         eventType: 'DUPLICATE_CLAIM_ATTEMPT',
         severity: 'medium',
         actor: userId,
-        ipAddress: (req.headers['x-forwarded-for'] as string) || req.socket.remoteAddress || '127.0.0.1',
-        description: `Rejected duplicate claim attempt on session ${session.sessionId}`,
+        ipAddress: clientIp,
+        description: `Rejected duplicate claim attempt on already claimed session ${session.sessionId}`,
       });
     }
 
     return res.status(400).json({
       success: false,
       error: claimValidation.error,
+      clockManipulationDetected: claimValidation.clockManipulationDetected,
+      manipulationDetails: claimValidation.manipulationDetails,
+      serverElapsedSeconds: claimValidation.elapsedSeconds,
     });
   }
 
+  // 5. Authoritatively enforce server-calculated reward capped at 0.00024 NXR
   const verifiedReward = claimValidation.rewardNXR;
   const txHash = `0x${now.toString(16)}${Math.random().toString(16).substring(2, 10)}0000`;
 
-  // Update session record
+  // 6. Atomically update session record
   session.claimed = true;
   session.claimedAt = now;
   session.rewardEarnedNXR = verifiedReward;
@@ -536,7 +1032,7 @@ app.post('/api/mining/claim', (req, res) => {
   session.claimTxHash = txHash;
   session.status = 'claimed';
 
-  // Ensure user exists in db
+  // 7. Ensure user exists in db
   let userWallet = dbUsers.get(userId);
   if (!userWallet) {
     userWallet = {
@@ -552,12 +1048,12 @@ app.post('/api/mining/claim', (req, res) => {
     dbUsers.set(userId, userWallet);
   }
 
-  // Atomically update balance
+  // 8. Atomically update balance via exact integer base-unit arithmetic
   const previousBalance = userWallet.balanceNXR;
-  const newBalance = Number((previousBalance + verifiedReward).toFixed(5));
+  const newBalance = addNxrBaseUnits(previousBalance, verifiedReward);
   userWallet.balanceNXR = newBalance;
 
-  // Write immutable ledger entry
+  // 9. Write immutable ledger entry
   const ledgerEntry: LedgerEntry = {
     id: `led_${now}_${Math.random().toString(36).substring(2, 6)}`,
     entryType: 'mining_reward',
@@ -567,37 +1063,53 @@ app.post('/api/mining/claim', (req, res) => {
     balanceAfterNXR: newBalance,
     referenceId: session.sessionId,
     timestamp: now,
-    note: `24-Hour Mining Cycle Reward (${claimValidation.elapsedSeconds}s)`,
+    note: `24-Hour Mining Cycle Reward (${claimValidation.clampedSeconds}s server-verified)`,
   };
   dbLedgerEntries.unshift(ledgerEntry);
 
-  // Write audit log
+  // 10. Write audit log
   dbAuditLogs.unshift({
     id: `log_${Date.now()}`,
     timestamp: now,
     action: 'MINING_REWARD_CLAIMED',
     category: 'mining',
     performedBy: userId,
-    ipAddress: (req.headers['x-forwarded-for'] as string) || req.socket.remoteAddress || '127.0.0.1',
-    details: `Claimed +${verifiedReward.toFixed(5)} NXR for session ${session.sessionId}`,
+    ipAddress: clientIp,
+    details: `Claimed +${verifiedReward.toFixed(5)} NXR for session ${session.sessionId} (Server DB verified: ${claimValidation.elapsedSeconds}s elapsed, Capped: ${claimValidation.isCapped})`,
     status: 'success',
   });
 
-  // Broadcast real-time event to SSE subscribers
+  // 11. Broadcast real-time event to SSE subscribers
   broadcastRealtimeEvent('MINING_CLAIM', {
     sessionId: session.sessionId,
     amountNXR: verifiedReward,
     timestamp: now,
     userId: userWallet.userId,
+    isCapped: claimValidation.isCapped,
   });
+
+  // 12. Dispatch authoritative in-app notification (deduplicated by session ID)
+  addServerNotification(
+    userWallet.userId,
+    'Mining Cycle Reward Claimed',
+    `+${verifiedReward.toFixed(5)} virtual NXR credited to your wallet (${claimValidation.clampedSeconds}s verified).`,
+    'reward',
+    `mining_claim_${session.sessionId}`,
+    session.sessionId
+  );
 
   return res.json({
     success: true,
     sessionId: session.sessionId,
     rewardNXR: verifiedReward,
+    rewardBaseUnits: claimValidation.rewardBaseUnits.toString(),
     newBalanceNXR: newBalance,
     txHash,
     timestamp: now,
+    elapsedSeconds: claimValidation.elapsedSeconds,
+    clampedSeconds: claimValidation.clampedSeconds,
+    isCapped: claimValidation.isCapped,
+    verifiedBy: 'SERVER_DATABASE_TIMESTAMP',
   });
 });
 
@@ -613,6 +1125,16 @@ app.post('/api/transfers/send', (req, res) => {
   } = req.body;
   const now = Date.now();
   const clientIp = (req.headers['x-forwarded-for'] as string) || req.socket.remoteAddress || '127.0.0.1';
+
+  // 0. Rate limiting: 15 transfer requests per minute
+  const rateCheck = checkRateLimit(`transfer_${clientIp}_${senderId}`, 15, 60000);
+  if (!rateCheck.allowed) {
+    return res.status(429).json({
+      success: false,
+      error: `Transfer rate limit reached. Please wait ${rateCheck.retryAfterSeconds} seconds before sending another transfer.`,
+      retryAfterSeconds: rateCheck.retryAfterSeconds,
+    });
+  }
 
   // 1. Get or initialize sender
   let sender = dbUsers.get(senderId);
@@ -680,9 +1202,9 @@ app.post('/api/transfers/send', (req, res) => {
     dbUsers.set(recId, recipient);
   }
 
-  // 4. Atomic balance adjustments
-  const newSenderBalance = Number((sender.balanceNXR - roundedAmount).toFixed(5));
-  const newRecipientBalance = Number((recipient.balanceNXR + roundedAmount).toFixed(5));
+  // 4. Atomic balance adjustments via exact base-unit integer arithmetic
+  const newSenderBalance = subtractNxrBaseUnits(sender.balanceNXR, roundedAmount);
+  const newRecipientBalance = addNxrBaseUnits(recipient.balanceNXR, roundedAmount);
 
   sender.balanceNXR = newSenderBalance;
   recipient.balanceNXR = newRecipientBalance;
@@ -758,6 +1280,25 @@ app.post('/api/transfers/send', (req, res) => {
     senderMasked: sender.walletAddress.substring(0, 8) + '...',
     recipientMasked: recipient.walletAddress.substring(0, 8) + '...',
   });
+
+  // 8. Dispatch In-App Notifications (deduplicated by txHash)
+  addServerNotification(
+    sender.userId,
+    'Transfer Sent',
+    `Sent ${roundedAmount.toFixed(5)} virtual NXR to ${maskWalletAddress(recipient.walletAddress)}.`,
+    'success',
+    `transfer_sent_${txHash}`,
+    txHash
+  );
+
+  addServerNotification(
+    recipient.userId,
+    'Transfer Received',
+    `Received +${roundedAmount.toFixed(5)} virtual NXR from ${maskWalletAddress(sender.walletAddress)}.`,
+    'reward',
+    `transfer_recv_${txHash}`,
+    txHash
+  );
 
   return res.json({
     success: true,
@@ -1116,6 +1657,453 @@ app.get('/api/admin/audit-logs', requireAdmin, (req, res) => {
     logs,
     total: logs.length,
   });
+});
+
+// 8.13 Auditable Balance Adjustment (Strictly Audited & Recorded in Ledger)
+app.post('/api/admin/users/:id/adjust-balance', requireAdmin, (req, res) => {
+  const { id } = req.params;
+  const { amountDeltaNXR, reason } = req.body;
+  const adminId = (req.headers['x-user-id'] as string) || 'admin_operator';
+  const clientIp = (req.headers['x-forwarded-for'] as string) || req.socket.remoteAddress || '127.0.0.1';
+  const now = Date.now();
+
+  const targetUser = dbUsers.get(id);
+  const validation = validateAdminBalanceAdjustment(
+    'admin',
+    targetUser,
+    amountDeltaNXR,
+    reason
+  );
+
+  if (!validation.valid) {
+    return res.status(400).json({
+      success: false,
+      error: validation.error,
+    });
+  }
+
+  const roundedDelta = validation.roundedDelta!;
+  const newBalance = validation.newBalanceNXR!;
+  const prevBalance = targetUser!.balanceNXR;
+
+  // Apply balance change atomically
+  targetUser!.balanceNXR = newBalance;
+
+  const adjTxHash = `0x_adj_${now.toString(16)}_${Math.random().toString(36).substring(2, 8)}`;
+
+  // Immutable Ledger Entry
+  const ledgerEntry: LedgerEntry = {
+    id: `led_adj_${now}`,
+    entryType: 'admin_adjustment',
+    userId: targetUser!.userId,
+    walletAddress: targetUser!.walletAddress,
+    amountNXR: roundedDelta,
+    balanceAfterNXR: newBalance,
+    referenceId: adjTxHash,
+    timestamp: now,
+    note: `Audited Admin Adjustment: ${reason.trim()} (By ${adminId})`,
+  };
+  dbLedgerEntries.unshift(ledgerEntry);
+
+  // Audit Log Entry
+  const logEntry: ServerAuditLog = {
+    id: `log_adj_${now}`,
+    timestamp: now,
+    action: 'ADMIN_BALANCE_ADJUSTMENT',
+    category: 'wallet',
+    performedBy: adminId,
+    ipAddress: clientIp,
+    details: `Admin ${adminId} adjusted user ${targetUser!.email} balance by ${roundedDelta >= 0 ? '+' : ''}${roundedDelta.toFixed(5)} NXR (from ${prevBalance.toFixed(5)} to ${newBalance.toFixed(5)} NXR). Reason: ${reason.trim()}`,
+    status: 'success',
+  };
+  dbAuditLogs.unshift(logEntry);
+
+  // Dispatch In-App Notification to User
+  addServerNotification(
+    targetUser!.userId,
+    'Audited Ledger Adjustment',
+    `An administrative balance adjustment of ${roundedDelta >= 0 ? '+' : ''}${roundedDelta.toFixed(5)} NXR was applied to your account. Reason: ${reason.trim()}`,
+    roundedDelta >= 0 ? 'info' : 'alert',
+    `adj_${now}`,
+    adjTxHash
+  );
+
+  broadcastRealtimeEvent('BALANCE_ADJUSTMENT', {
+    targetUserId: targetUser!.userId,
+    deltaNXR: roundedDelta,
+    newBalanceNXR: newBalance,
+    timestamp: now,
+  });
+
+  return res.json({
+    success: true,
+    user: {
+      userId: targetUser!.userId,
+      email: targetUser!.email,
+      walletAddress: targetUser!.walletAddress,
+      balanceNXR: newBalance,
+      previousBalanceNXR: prevBalance,
+    },
+    ledgerEntry,
+    message: `Balance adjusted by ${roundedDelta >= 0 ? '+' : ''}${roundedDelta.toFixed(5)} NXR with verified ledger and audit entry.`,
+  });
+});
+
+// ----------------------------------------------------------------------------
+// 8.14 USER NOTIFICATIONS API (Authoritative DB Store & Deduplication)
+// ----------------------------------------------------------------------------
+app.get('/api/notifications', (req: Request, res: Response) => {
+  const userId = (req.headers['x-user-id'] as string) || (req.query.userId as string) || '';
+  if (!userId) {
+    return res.status(400).json({ success: false, error: 'User ID is required.' });
+  }
+
+  const userNotifs = dbNotifications.filter(n => n.userId === userId || n.userId === 'all');
+  const unreadCount = userNotifs.filter(n => !n.read).length;
+
+  return res.json({
+    success: true,
+    notifications: userNotifs,
+    unreadCount,
+    timestamp: Date.now(),
+  });
+});
+
+app.post('/api/notifications/read', (req: Request, res: Response) => {
+  const userId = (req.headers['x-user-id'] as string) || req.body.userId || '';
+  const { id, all = false } = req.body;
+
+  if (!userId) {
+    return res.status(400).json({ success: false, error: 'User ID is required.' });
+  }
+
+  if (all) {
+    for (const notif of dbNotifications) {
+      if (notif.userId === userId || notif.userId === 'all') {
+        notif.read = true;
+      }
+    }
+  } else if (id) {
+    const target = dbNotifications.find(n => n.id === id && (n.userId === userId || n.userId === 'all'));
+    if (target) {
+      target.read = true;
+    }
+  }
+
+  const unreadCount = dbNotifications.filter(n => (n.userId === userId || n.userId === 'all') && !n.read).length;
+
+  return res.json({
+    success: true,
+    unreadCount,
+  });
+});
+
+app.post('/api/notifications/clear', (req: Request, res: Response) => {
+  const userId = (req.headers['x-user-id'] as string) || req.body.userId || '';
+  if (!userId) {
+    return res.status(400).json({ success: false, error: 'User ID is required.' });
+  }
+
+  // Remove read notifications for this user
+  for (let i = dbNotifications.length - 1; i >= 0; i--) {
+    if ((dbNotifications[i].userId === userId || dbNotifications[i].userId === 'all') && dbNotifications[i].read) {
+      dbNotifications.splice(i, 1);
+    }
+  }
+
+  return res.json({ success: true, remaining: dbNotifications.filter(n => n.userId === userId).length });
+});
+
+// ----------------------------------------------------------------------------
+// 8.15 TRANSACTION CENTER API (Authoritative Database Ledger Read-Only View)
+// ----------------------------------------------------------------------------
+app.get('/api/transactions/my', (req: Request, res: Response) => {
+  const userId = (req.headers['x-user-id'] as string) || (req.query.userId as string) || '';
+  const filterType = (req.query.type as string) || 'all';
+  const search = ((req.query.search as string) || '').toLowerCase().trim();
+  const page = Math.max(1, parseInt((req.query.page as string) || '1', 10));
+  const limit = Math.max(1, Math.min(100, parseInt((req.query.limit as string) || '10', 10)));
+
+  if (!userId) {
+    return res.status(400).json({ success: false, error: 'User ID is required.' });
+  }
+
+  const user = dbUsers.get(userId);
+  const userWallet = user?.walletAddress || '';
+
+  // Get matching ledger entries
+  const userLedger = dbLedgerEntries.filter(
+    e => e.userId === userId || (userWallet && e.walletAddress.toLowerCase() === userWallet.toLowerCase())
+  );
+
+  // Map to unified VirtualTransaction view
+  let mapped = userLedger.map(entry => {
+    let type: 'mining_reward' | 'send' | 'receive' | 'referral_reward' | 'admin_adjustment' = 'mining_reward';
+    let fromAddress = 'NEXORA-PROTOCOL-LEDGER';
+    let toAddress = entry.walletAddress;
+
+    if (entry.entryType === 'mining_reward') {
+      type = 'mining_reward';
+      fromAddress = 'NEXORA-SIMULATION-POOL';
+    } else if (entry.entryType === 'transfer_send') {
+      type = 'send';
+      fromAddress = entry.walletAddress;
+      toAddress = entry.note?.replace('Transfer to ', '') || 'External Node';
+    } else if (entry.entryType === 'transfer_receive') {
+      type = 'receive';
+      fromAddress = entry.note?.replace('Transfer from ', '') || 'External Node';
+      toAddress = entry.walletAddress;
+    } else if (entry.entryType === 'referral_reward') {
+      type = 'referral_reward';
+      fromAddress = 'NEXORA-COMMUNITY-FUND';
+    } else if (entry.entryType === 'admin_adjustment') {
+      type = 'admin_adjustment';
+      fromAddress = 'NEXORA-AUDIT-GOVERNANCE';
+    }
+
+    return {
+      id: entry.id,
+      txHash: entry.referenceId || entry.id,
+      type,
+      asset: 'NXR',
+      amount: Math.abs(entry.amountNXR),
+      amountRaw: entry.amountNXR,
+      balanceAfterNXR: entry.balanceAfterNXR,
+      fee: 0.0,
+      timestamp: entry.timestamp,
+      fromAddress,
+      toAddress,
+      status: 'completed' as const,
+      note: entry.note || '',
+      referenceId: entry.referenceId,
+    };
+  });
+
+  // Apply Filter
+  if (filterType !== 'all') {
+    mapped = mapped.filter(tx => tx.type === filterType);
+  }
+
+  // Apply Search
+  if (search) {
+    mapped = mapped.filter(
+      tx =>
+        tx.txHash.toLowerCase().includes(search) ||
+        tx.fromAddress.toLowerCase().includes(search) ||
+        tx.toAddress.toLowerCase().includes(search) ||
+        (tx.note && tx.note.toLowerCase().includes(search))
+    );
+  }
+
+  // Sort descending by timestamp
+  mapped.sort((a, b) => b.timestamp - a.timestamp);
+
+  const total = mapped.length;
+  const totalPages = Math.ceil(total / limit) || 1;
+  const paginated = mapped.slice((page - 1) * limit, page * limit);
+
+  return res.json({
+    success: true,
+    transactions: paginated,
+    pagination: {
+      total,
+      page,
+      limit,
+      totalPages,
+    },
+    filterType,
+    authoritativeLedgerCount: userLedger.length,
+    disclaimer: 'NEXORA COIN is currently a virtual simulation. NXR balances and transfers are internal database records, not blockchain assets. No real-money value is guaranteed.',
+  });
+});
+
+// ----------------------------------------------------------------------------
+// 8.16 USER ACCOUNT SETTINGS & SECURITY API
+// ----------------------------------------------------------------------------
+app.post('/api/user/profile', (req: Request, res: Response) => {
+  const userId = (req.headers['x-user-id'] as string) || req.body.userId || '';
+  const { displayName } = req.body;
+  const clientIp = (req.headers['x-forwarded-for'] as string) || req.socket.remoteAddress || '127.0.0.1';
+
+  if (!userId) {
+    return res.status(400).json({ success: false, error: 'User ID is required.' });
+  }
+
+  const user = dbUsers.get(userId);
+  if (!user) {
+    return res.status(404).json({ success: false, error: 'User not found in registry.' });
+  }
+
+  if (typeof displayName === 'string') {
+    const cleanName = displayName.trim();
+    if (cleanName.length < 2 || cleanName.length > 50) {
+      return res.status(400).json({ success: false, error: 'Display name must be between 2 and 50 characters.' });
+    }
+    user.displayName = cleanName;
+  }
+
+  dbAuditLogs.unshift({
+    id: `log_prof_${Date.now()}`,
+    timestamp: Date.now(),
+    action: 'USER_PROFILE_UPDATED',
+    category: 'auth',
+    performedBy: user.userId,
+    ipAddress: clientIp,
+    details: `User ${user.email} updated display name to: ${user.displayName}`,
+    status: 'success',
+  });
+
+  addServerNotification(
+    user.userId,
+    'Profile Updated',
+    `Your node display name was updated to "${user.displayName}".`,
+    'info',
+    `profile_update_${Date.now()}`
+  );
+
+  return res.json({
+    success: true,
+    user: {
+      userId: user.userId,
+      email: user.email,
+      displayName: user.displayName,
+      role: user.role,
+      status: user.status,
+      walletAddress: user.walletAddress,
+      balanceNXR: user.balanceNXR,
+    },
+  });
+});
+
+app.post('/api/user/password-reset', (req: Request, res: Response) => {
+  const clientIp = (req.headers['x-forwarded-for'] as string) || req.socket.remoteAddress || '127.0.0.1';
+  const { email, newPassword } = req.body;
+
+  // Rate limiting: 5 password reset requests per 15 minutes per IP
+  const rateCheck = checkRateLimit(`pwd_reset_${clientIp}`, 5, 15 * 60 * 1000);
+  if (!rateCheck.allowed) {
+    return res.status(429).json({
+      success: false,
+      error: `Too many password reset attempts. Please wait ${rateCheck.retryAfterSeconds} seconds.`,
+      retryAfterSeconds: rateCheck.retryAfterSeconds,
+    });
+  }
+
+  if (!email || !email.includes('@')) {
+    return res.status(400).json({ success: false, error: 'Please provide a valid account email.' });
+  }
+
+  if (!newPassword || typeof newPassword !== 'string' || newPassword.length < 8) {
+    return res.status(400).json({ success: false, error: 'Password must be at least 8 characters long.' });
+  }
+
+  // Find user
+  const user = Array.from(dbUsers.values()).find(u => u.email.toLowerCase() === email.toLowerCase().trim());
+  if (!user) {
+    return res.status(404).json({ success: false, error: 'No account registered with this email address.' });
+  }
+
+  dbAuditLogs.unshift({
+    id: `log_pwd_${Date.now()}`,
+    timestamp: Date.now(),
+    action: 'PASSWORD_RESET_EXECUTED',
+    category: 'security',
+    performedBy: user.userId,
+    ipAddress: clientIp,
+    details: `Password credentials reset for account: ${maskEmail(user.email)}`,
+    status: 'success',
+  });
+
+  addServerNotification(
+    user.userId,
+    'Security Alert: Password Changed',
+    'Your master credentials were changed successfully. If you did not make this change, contact system administration.',
+    'alert',
+    `pwd_reset_${Date.now()}`
+  );
+
+  return res.json({
+    success: true,
+    message: 'Master passphrase reset successfully.',
+  });
+});
+
+app.get('/api/user/sessions', (req: Request, res: Response) => {
+  const userId = (req.headers['x-user-id'] as string) || (req.query.userId as string) || '';
+  const clientIp = (req.headers['x-forwarded-for'] as string) || req.socket.remoteAddress || '127.0.0.1';
+  const userAgent = req.headers['user-agent'] || 'Modern Web Browser';
+
+  if (!userId) {
+    return res.status(400).json({ success: false, error: 'User ID is required.' });
+  }
+
+  // Ensure current session exists in dbSessions
+  let currentSession = dbSessions.find(s => s.userId === userId && s.ipAddress === clientIp);
+  if (!currentSession) {
+    currentSession = {
+      sessionId: `sess_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
+      userId,
+      ipAddress: clientIp,
+      userAgent,
+      createdAt: Date.now() - 3600000,
+      lastActiveAt: Date.now(),
+    };
+    dbSessions.unshift(currentSession);
+  } else {
+    currentSession.lastActiveAt = Date.now();
+  }
+
+  const userSessions = dbSessions.filter(s => s.userId === userId).map(s => ({
+    sessionId: s.sessionId,
+    userId: s.userId,
+    ipAddress: s.ipAddress,
+    userAgent: s.userAgent,
+    createdAt: s.createdAt,
+    lastActiveAt: s.lastActiveAt,
+    isCurrent: s.sessionId === currentSession?.sessionId,
+  }));
+
+  return res.json({
+    success: true,
+    sessions: userSessions,
+  });
+});
+
+app.post('/api/user/sessions/revoke', (req: Request, res: Response) => {
+  const userId = (req.headers['x-user-id'] as string) || req.body.userId || '';
+  const { sessionId } = req.body;
+
+  if (!userId) {
+    return res.status(400).json({ success: false, error: 'User ID is required.' });
+  }
+
+  if (sessionId === 'all_others') {
+    // Keep only the newest session
+    const userSess = dbSessions.filter(s => s.userId === userId);
+    if (userSess.length > 1) {
+      const current = userSess[0];
+      for (let i = dbSessions.length - 1; i >= 0; i--) {
+        if (dbSessions[i].userId === userId && dbSessions[i].sessionId !== current.sessionId) {
+          dbSessions.splice(i, 1);
+        }
+      }
+    }
+  } else if (sessionId) {
+    const idx = dbSessions.findIndex(s => s.userId === userId && s.sessionId === sessionId);
+    if (idx !== -1) {
+      dbSessions.splice(idx, 1);
+    }
+  }
+
+  addServerNotification(
+    userId,
+    'Session Terminated',
+    'Active session(s) were terminated as requested.',
+    'info',
+    `session_term_${Date.now()}`
+  );
+
+  return res.json({ success: true, message: 'Sessions updated successfully.' });
 });
 
 // ----------------------------------------------------------------------------

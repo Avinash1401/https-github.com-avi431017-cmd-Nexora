@@ -395,3 +395,31 @@ export async function syncUserWithBackend(user: {
     // Non-blocking sync
   }
 }
+
+export async function executeAdminBalanceAdjustment(
+  role: string,
+  userId: string,
+  targetUserId: string,
+  amountDeltaNXR: number,
+  reason: string
+): Promise<{ success: boolean; user?: AdminUserRecord; ledgerEntry?: AdminLedgerEntry; message?: string; error?: string }> {
+  try {
+    const res = await fetch(`/api/admin/users/${targetUserId}/adjust-balance`, {
+      method: 'POST',
+      headers: getAuthHeaders(role, userId),
+      body: JSON.stringify({ amountDeltaNXR, reason }),
+    });
+    const data = await res.json();
+    if (!res.ok || !data.success) {
+      return { success: false, error: data.error || 'Failed to execute balance adjustment' };
+    }
+    return {
+      success: true,
+      user: data.user,
+      ledgerEntry: data.ledgerEntry,
+      message: data.message,
+    };
+  } catch (err: any) {
+    return { success: false, error: err?.message || 'Network error executing balance adjustment' };
+  }
+}

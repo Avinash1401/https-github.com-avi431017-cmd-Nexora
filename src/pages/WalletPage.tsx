@@ -110,11 +110,16 @@ export const WalletPage: React.FC = () => {
             <ShieldAlert className="w-5 h-5 shrink-0" />
           </div>
           <div>
-            <span className="text-xs font-mono font-bold tracking-wider text-amber-300 uppercase px-2 py-0.5 rounded bg-amber-500/10 border border-amber-500/30">
-              INTERNAL VIRTUAL LEDGER — STRICTLY NON-MONETARY
-            </span>
-            <p className="text-xs text-slate-300 mt-1">
-              Virtual NXR balances are not real cryptocurrency, do not hold fiat currency value, and cannot be withdrawn or sold for real money. Internal transfers take place solely within the NEXORA virtual ledger between registered user addresses.
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="text-xs font-mono font-bold tracking-wider text-amber-300 uppercase px-2 py-0.5 rounded bg-amber-500/15 border border-amber-500/40">
+                VIRTUAL NXR — NOT A BLOCKCHAIN WALLET
+              </span>
+              <span className="text-[10px] font-mono text-emerald-400 px-2 py-0.5 rounded bg-emerald-500/10 border border-emerald-500/30">
+                Integer Base-Unit Accounting Active
+              </span>
+            </div>
+            <p className="text-xs text-slate-300 mt-1 leading-relaxed">
+              NEXORA COIN is currently a virtual simulation. NXR balances and transfers are internal database records, not blockchain assets. No real-money value is guaranteed. Internal transfers take place solely within the NEXORA virtual ledger between registered user addresses.
             </p>
           </div>
         </div>

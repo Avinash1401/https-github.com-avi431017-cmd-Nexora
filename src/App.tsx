@@ -13,6 +13,10 @@ import { WalletPage } from './pages/WalletPage';
 import { WatchlistPage } from './pages/WatchlistPage';
 import { AdminPage } from './pages/AdminPage';
 import { AuthPage } from './pages/AuthPage';
+import { TokenomicsPage } from './pages/TokenomicsPage';
+import { LeaderboardPage } from './pages/LeaderboardPage';
+import { TransactionsPage } from './pages/TransactionsPage';
+import { AccountPage } from './pages/AccountPage';
 
 const AppContent: React.FC = () => {
   const { activeTab, setActiveTab } = useApp();
@@ -38,10 +42,14 @@ const AppContent: React.FC = () => {
         {activeTab === 'home' && <LandingPage onOpenDbModal={() => setIsDbModalOpen(true)} />}
         {activeTab === 'dashboard' && <DashboardPage />}
         {activeTab === 'mining' && <MiningPage />}
+        {activeTab === 'transactions' && <TransactionsPage />}
+        {activeTab === 'tokenomics' && <TokenomicsPage />}
+        {activeTab === 'leaderboard' && <LeaderboardPage />}
         {activeTab === 'market' && <MarketPage />}
         {activeTab === 'portfolio' && <PortfolioPage />}
         {activeTab === 'wallet' && <WalletPage />}
         {activeTab === 'watchlist' && <WatchlistPage />}
+        {activeTab === 'account' && <AccountPage />}
         {activeTab === 'admin' && <AdminPage onOpenDbModal={() => setIsDbModalOpen(true)} />}
         {activeTab === 'auth' && <AuthPage />}
       </main>

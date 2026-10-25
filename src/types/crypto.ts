@@ -17,9 +17,10 @@ export interface CryptoCoin {
 }
 
 export interface MiningSessionState {
+  sessionId?: string;
   isActive: boolean;
   isPaused: boolean;
-  startedAt: number | null; // Server-recorded start timestamp
+  startedAt: number | null; // Server-recorded database start timestamp
   lastTickAt: number | null;
   elapsedSeconds: number; // 0 to 86,400 seconds
   remainingSeconds: number; // 86,400 to 0 seconds
@@ -28,6 +29,7 @@ export interface MiningSessionState {
   currentHashRate: number; // Nominal telemetry display (MH/s)
   currentNonce: number;
   claimed: boolean;
+  serverVerified?: boolean;
   // Computed helpers for component convenience
   sessionAccruedNXR?: number;
   totalEarnedAllTimeNXR?: number;
@@ -50,7 +52,7 @@ export interface MiningHistoryBlock {
 export interface VirtualTransaction {
   id: string;
   txHash: string;
-  type: 'mining_reward' | 'send' | 'receive' | 'virtual_transfer';
+  type: 'mining_reward' | 'send' | 'receive' | 'virtual_transfer' | 'referral_reward' | 'admin_adjustment';
   asset: string;
   amount: number;
   amountUsd?: number | null;
@@ -61,6 +63,7 @@ export interface VirtualTransaction {
   status: 'completed' | 'pending' | 'failed';
   note?: string;
   idempotencyKey?: string;
+  referenceId?: string;
 }
 
 export interface PortfolioAsset {
@@ -84,16 +87,39 @@ export interface UserProfile {
   twoFactorEnabled: boolean;
   virtualWalletAddress: string;
   virtualBalanceNXR: number; // Strictly 0.00000 for new users
+  referralCode?: string;
+  referredBy?: string;
+}
+
+export interface UserSession {
+  sessionId: string;
+  userId: string;
+  ipAddress: string;
+  userAgent: string;
+  createdAt: number;
+  lastActiveAt: number;
+  isCurrent: boolean;
+}
+
+export interface ReferralItem {
+  id: string;
+  referrerId: string;
+  referredUserId: string;
+  maskedEmail: string;
+  timestamp: number;
+  rewardNXR: number;
+  status: 'confirmed' | 'pending';
 }
 
 export interface NotificationItem {
   id: string;
   title: string;
   message: string;
-  type: 'info' | 'success' | 'warning' | 'reward';
+  type: 'info' | 'success' | 'warning' | 'reward' | 'alert' | 'system';
   timestamp: number;
   read: boolean;
   link?: string;
+  deduplicationKey?: string;
 }
 
 export interface AdminAuditLog {

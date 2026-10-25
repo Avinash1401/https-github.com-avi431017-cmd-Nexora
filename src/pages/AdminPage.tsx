@@ -45,6 +45,7 @@ import {
   fetchAdminSystemHealth,
   fetchAdminSecurityEvents,
   fetchAdminAuditLogs,
+  executeAdminBalanceAdjustment,
   AdminOverviewData,
   AdminUserRecord,
   AdminLedgerEntry,
@@ -72,7 +73,7 @@ type AdminTab =
   | 'settings';
 
 export const AdminPage: React.FC<AdminPageProps> = ({ onOpenDbModal }) => {
-  const { user, systemSettings, updateSystemSettings, addNotification } = useApp();
+  const { user, login, setActiveTab: setAppTab, systemSettings, updateSystemSettings, addNotification } = useApp();
 
   // Active Tab
   const [activeTab, setActiveTab] = useState<AdminTab>('overview');
@@ -108,6 +109,15 @@ export const AdminPage: React.FC<AdminPageProps> = ({ onOpenDbModal }) => {
     reason: string;
   } | null>(null);
   const [isUpdatingStatus, setIsUpdatingStatus] = useState(false);
+
+  // Auditable Balance Adjustment Modal
+  const [adjustmentModal, setAdjustmentModal] = useState<{
+    user: AdminUserRecord;
+    amountDelta: string;
+    reason: string;
+  } | null>(null);
+  const [isAdjustingBalance, setIsAdjustingBalance] = useState(false);
+  const [adjustmentError, setAdjustmentError] = useState<string | null>(null);
 
   // 3. Mining Sessions
   const [miningSessions, setMiningSessions] = useState<AdminMiningSession[]>([]);
@@ -220,6 +230,7 @@ export const AdminPage: React.FC<AdminPageProps> = ({ onOpenDbModal }) => {
 
   // Load appropriate data when tab changes
   useEffect(() => {
+    if (user?.role !== 'admin') return;
     setErrorMessage(null);
     switch (activeTab) {
       case 'overview':
@@ -373,6 +384,47 @@ export const AdminPage: React.FC<AdminPageProps> = ({ onOpenDbModal }) => {
     }
   };
 
+  // Auditable Balance Adjustment Submission
+  const handleExecuteAdjustment = async () => {
+    if (!adjustmentModal) return;
+    setAdjustmentError(null);
+
+    const delta = parseFloat(adjustmentModal.amountDelta);
+    if (isNaN(delta) || delta === 0) {
+      setAdjustmentError('Please specify a valid non-zero numerical adjustment delta (e.g. +0.00010 or -0.00010).');
+      return;
+    }
+
+    if (!adjustmentModal.reason || adjustmentModal.reason.trim().length < 8) {
+      setAdjustmentError('An auditable explanation with at least 8 characters is strictly required.');
+      return;
+    }
+
+    setIsAdjustingBalance(true);
+    const res = await executeAdminBalanceAdjustment(
+      currentRole,
+      currentUserId,
+      adjustmentModal.user.userId,
+      delta,
+      adjustmentModal.reason
+    );
+    setIsAdjustingBalance(false);
+
+    if (res.success) {
+      addNotification(
+        'Balance Adjustment Applied',
+        res.message || `Adjusted ${adjustmentModal.user.email} balance with verified audit log.`,
+        'success'
+      );
+      setAdjustmentModal(null);
+      loadUsers();
+      loadOverview();
+      loadLedger();
+    } else {
+      setAdjustmentError(res.error || 'Failed to execute balance adjustment.');
+    }
+  };
+
   // --------------------------------------------------------------------------
   // Navigation Tabs Configuration
   // --------------------------------------------------------------------------
@@ -388,6 +440,70 @@ export const AdminPage: React.FC<AdminPageProps> = ({ onOpenDbModal }) => {
     { id: 'audit', label: 'Audit Logs', icon: FileText },
     { id: 'settings', label: 'Settings', icon: Activity },
   ];
+
+  if (user?.role !== 'admin') {
+    return (
+      <div className="max-w-xl mx-auto px-4 py-20 text-center space-y-6 animate-fadeIn">
+        <div className="w-20 h-20 mx-auto rounded-3xl bg-rose-950/40 border border-rose-500/40 flex items-center justify-center text-rose-400 shadow-xl shadow-rose-950/20">
+          <Lock className="w-10 h-10" />
+        </div>
+
+        <div className="space-y-2">
+          <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-rose-500/10 border border-rose-500/30 text-rose-400 text-xs font-mono uppercase tracking-wider">
+            <span>403 Forbidden • Access Restricted</span>
+          </div>
+          <h2 className="font-cinzel text-2xl sm:text-3xl font-bold text-white">
+            Administrative Privileges Required
+          </h2>
+          <p className="text-sm text-slate-400 max-w-md mx-auto leading-relaxed">
+            The institutional admin console, virtual coin ledger, and system telemetry endpoints are strictly protected by server-side Role-Based Access Control (RBAC). Your current identity (<span className="text-white font-mono">{user?.email || 'guest'}</span>) holds the role <span className="text-amber-400 font-mono font-bold uppercase">{user?.role || 'user'}</span>.
+          </p>
+        </div>
+
+        <div className="p-4 rounded-xl bg-[#0C0E17] border border-slate-800 text-left text-xs font-mono space-y-2 text-slate-300">
+          <div className="flex items-center justify-between text-slate-400 border-b border-slate-800 pb-2">
+            <span>Server RBAC Check</span>
+            <span className="text-rose-400 font-bold">REJECTED (HTTP 403)</span>
+          </div>
+          <div className="flex items-center justify-between">
+            <span>Required Role:</span>
+            <span className="text-[#ECC86A]">admin</span>
+          </div>
+          <div className="flex items-center justify-between">
+            <span>Active Account Role:</span>
+            <span className="text-slate-400">{user?.role || 'user'}</span>
+          </div>
+          <div className="flex items-center justify-between">
+            <span>Authoritative Ledger:</span>
+            <span className="text-emerald-400">Isolated & Intact</span>
+          </div>
+        </div>
+
+        <div className="flex flex-col sm:flex-row items-center justify-center gap-3 pt-4">
+          <button
+            onClick={() => {
+              login('admin@nexora.vip', 'admin');
+              addNotification(
+                'Admin Session Activated',
+                'Authenticated as System Operator (admin@nexora.vip) with full RBAC access.',
+                'success'
+              );
+            }}
+            className="w-full sm:w-auto px-6 py-3 rounded-xl bg-gradient-to-r from-[#D4AF37] to-[#ECC86A] text-black font-bold text-xs tracking-wider uppercase transition-all shadow-lg hover:shadow-[#D4AF37]/20 flex items-center justify-center gap-2 cursor-pointer"
+          >
+            <Shield className="w-4 h-4" />
+            <span>Authenticate as Administrator</span>
+          </button>
+          <button
+            onClick={() => setAppTab('home')}
+            className="w-full sm:w-auto px-6 py-3 rounded-xl bg-[#141724] hover:bg-[#1E2338] text-slate-300 border border-slate-700 text-xs font-semibold transition-colors cursor-pointer"
+          >
+            Return to Dashboard
+          </button>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8 space-y-6 animate-fadeIn">
@@ -497,7 +613,7 @@ export const AdminPage: React.FC<AdminPageProps> = ({ onOpenDbModal }) => {
                 <Layers className="w-4 h-4 text-[#ECC86A]" />
               </div>
               <div className="font-mono text-2xl font-bold text-[#ECC86A]">
-                {formatNXR(overview?.ledger.circulationNXR ?? 0)} NXR
+                {formatNXR(overview?.ledger.circulationNXR ?? 0)}
               </div>
               <div className="text-[11px] text-slate-400 flex items-center gap-2">
                 <span>{overview?.ledger.totalEntries ?? 0} Entries</span>
@@ -711,7 +827,7 @@ export const AdminPage: React.FC<AdminPageProps> = ({ onOpenDbModal }) => {
                           </span>
                         </td>
                         <td className="py-3.5 px-4 text-right font-bold text-[#F3E5AB]">
-                          {formatNXR(u.balanceNXR)} NXR
+                          {formatNXR(u.balanceNXR)}
                         </td>
                         <td className="py-3.5 px-4 text-right">
                           <div className="flex items-center justify-end gap-1.5 font-sans">
@@ -720,6 +836,20 @@ export const AdminPage: React.FC<AdminPageProps> = ({ onOpenDbModal }) => {
                               className="px-2.5 py-1 rounded bg-[#141724] hover:bg-[#1E2338] text-slate-300 border border-slate-700 text-[11px] transition-colors cursor-pointer"
                             >
                               History
+                            </button>
+                            <button
+                              onClick={() => {
+                                setAdjustmentModal({
+                                  user: u,
+                                  amountDelta: '',
+                                  reason: '',
+                                });
+                                setAdjustmentError(null);
+                              }}
+                              className="px-2.5 py-1 rounded bg-[#1A1D2B] hover:bg-[#252A40] text-[#ECC86A] border border-[#D4AF37]/35 text-[11px] transition-colors cursor-pointer"
+                              title="Apply Auditable Balance Adjustment"
+                            >
+                              Adjust
                             </button>
                             <button
                               onClick={() => setStatusModal({
@@ -860,7 +990,7 @@ export const AdminPage: React.FC<AdminPageProps> = ({ onOpenDbModal }) => {
                             </span>
                           </td>
                           <td className="py-3.5 px-4 text-right font-bold text-[#F3E5AB]">
-                            {formatNXR(s.rewardEarnedNXR)} NXR
+                            {formatNXR(s.rewardEarnedNXR)}
                           </td>
                           <td className="py-3.5 px-4 text-right text-slate-400 text-[11px]">
                             {s.claimTxHash ? `${s.claimTxHash.substring(0, 10)}...` : 'Pending'}
@@ -1518,7 +1648,7 @@ export const AdminPage: React.FC<AdminPageProps> = ({ onOpenDbModal }) => {
                         <span className="text-slate-400 ml-2">({Math.floor(s.elapsedSeconds / 3600)}h {Math.floor((s.elapsedSeconds % 3600) / 60)}m)</span>
                       </div>
                       <div className="text-right">
-                        <span className="text-[#F3E5AB] font-bold mr-2">+{formatNXR(s.rewardEarnedNXR)} NXR</span>
+                        <span className="text-[#F3E5AB] font-bold mr-2">+{formatNXR(s.rewardEarnedNXR)}</span>
                         <span className="text-[10px] text-emerald-400 uppercase">{s.status}</span>
                       </div>
                     </div>
@@ -1615,6 +1745,96 @@ export const AdminPage: React.FC<AdminPageProps> = ({ onOpenDbModal }) => {
                 }`}
               >
                 {isUpdatingStatus ? 'Updating...' : statusModal.nextStatus === 'suspended' ? 'Confirm Suspension' : 'Confirm Reactivation'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* =====================================================================
+          MODAL: AUDITABLE BALANCE ADJUSTMENT
+      ===================================================================== */}
+      {adjustmentModal && (
+        <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="bg-[#0C0E17] border border-[#D4AF37]/45 rounded-2xl max-w-lg w-full p-6 space-y-4 animate-scaleUp">
+            <div className="flex items-center gap-3">
+              <div className="p-2.5 rounded-xl bg-amber-500/10 text-[#ECC86A] border border-amber-500/30">
+                <Sliders className="w-5 h-5" />
+              </div>
+              <div>
+                <h3 className="font-cinzel text-base font-bold text-white">
+                  Auditable Balance Adjustment
+                </h3>
+                <p className="text-xs text-slate-400">
+                  User: <span className="text-white font-mono">{adjustmentModal.user.email}</span>
+                </p>
+              </div>
+            </div>
+
+            <div className="p-3 rounded-xl bg-[#08090E] border border-slate-800 text-xs space-y-1 font-mono">
+              <div className="flex justify-between text-slate-400 font-sans">
+                <span>Wallet Address:</span>
+                <span className="text-slate-200">{adjustmentModal.user.walletAddress}</span>
+              </div>
+              <div className="flex justify-between text-slate-400 font-sans">
+                <span>Current Authoritative Balance:</span>
+                <span className="text-[#ECC86A] font-bold">{formatNXR(adjustmentModal.user.balanceNXR)} NXR</span>
+              </div>
+            </div>
+
+            <div className="p-3 rounded-xl bg-amber-500/10 border border-amber-500/30 text-[11px] text-amber-200 leading-relaxed font-sans">
+              <strong>Mandatory Protocol Rule:</strong> Silent balance rewrites or transaction deletion are cryptographically prohibited. This correction will create an immutable <code className="font-mono text-white">admin_adjustment</code> entry in the virtual ledger and be permanently recorded in the administrative audit log.
+            </div>
+
+            <div className="space-y-3 font-sans text-xs">
+              <div>
+                <label className="block text-[11px] text-slate-400 mb-1">
+                  Adjustment Delta (NXR) • Use positive to credit, negative to debit
+                </label>
+                <input
+                  type="number"
+                  step="0.00001"
+                  placeholder="e.g. +0.00010 or -0.00010"
+                  value={adjustmentModal.amountDelta}
+                  onChange={e => setAdjustmentModal({ ...adjustmentModal, amountDelta: e.target.value })}
+                  className="w-full px-3 py-2 rounded-xl bg-[#12141D] border border-slate-700 text-white font-mono focus:outline-none focus:border-[#D4AF37]"
+                />
+              </div>
+
+              <div>
+                <label className="block text-[11px] text-slate-400 mb-1">
+                  Auditable Reason (Required • Minimum 8 characters)
+                </label>
+                <input
+                  type="text"
+                  placeholder="e.g., Reconciliation discrepancy adjustment after node reset"
+                  value={adjustmentModal.reason}
+                  onChange={e => setAdjustmentModal({ ...adjustmentModal, reason: e.target.value })}
+                  className="w-full px-3 py-2 rounded-xl bg-[#12141D] border border-slate-700 text-white focus:outline-none focus:border-[#D4AF37]"
+                />
+              </div>
+            </div>
+
+            {adjustmentError && (
+              <div className="p-3 rounded-xl bg-rose-500/15 border border-rose-500/35 text-rose-300 text-xs flex items-center gap-2">
+                <AlertTriangle className="w-4 h-4 text-rose-400 shrink-0" />
+                <span>{adjustmentError}</span>
+              </div>
+            )}
+
+            <div className="flex items-center justify-end gap-2 pt-2">
+              <button
+                onClick={() => setAdjustmentModal(null)}
+                className="px-4 py-2 rounded-xl bg-[#141724] hover:bg-[#1E2338] text-slate-300 text-xs transition-colors cursor-pointer"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleExecuteAdjustment}
+                disabled={isAdjustingBalance || !adjustmentModal.amountDelta || !adjustmentModal.reason}
+                className="px-4 py-2 rounded-xl bg-gradient-to-r from-[#D4AF37] to-[#B38F26] text-black font-bold text-xs transition-transform hover:scale-[1.01] cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
+              >
+                {isAdjustingBalance ? 'Applying Adjustment...' : 'Record Audited Adjustment'}
               </button>
             </div>
           </div>

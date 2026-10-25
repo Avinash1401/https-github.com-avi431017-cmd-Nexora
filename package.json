@@ -10,7 +10,7 @@
     "preview": "vite preview",
     "clean": "rm -rf dist server.js",
     "lint": "tsc --noEmit",
-    "test": "tsx --test src/utils/miningRules.test.ts src/utils/portfolioCalculations.test.ts src/utils/authValidation.test.ts src/utils/phase4Security.test.ts"
+    "test": "tsx --test src/utils/miningRules.test.ts src/utils/portfolioCalculations.test.ts src/utils/authValidation.test.ts src/utils/phase4Security.test.ts src/utils/virtualEcosystem.test.ts src/utils/serverMiningVerification.test.ts src/utils/platformReliability.test.ts"
   },
   "dependencies": {
     "@google/genai": "^2.4.0",

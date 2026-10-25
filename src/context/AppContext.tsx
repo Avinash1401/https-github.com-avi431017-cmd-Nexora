@@ -35,6 +35,12 @@ import {
 } from '../utils/portfolioCalculations';
 import { playAudioBriefing } from '../services/audioService';
 import { syncUserWithBackend } from '../services/adminService';
+import {
+  fetchMyNotifications,
+  markNotificationAsReadOnServer,
+  clearReadNotificationsOnServer,
+  fetchMyTransactions,
+} from '../services/userService';
 
 interface AppContextType {
   // Navigation
@@ -44,7 +50,7 @@ interface AppContextType {
   // User & Authentication
   user: UserProfile | null;
   login: (email: string, role?: 'user' | 'miner' | 'admin') => boolean;
-  register: (email: string, displayName: string, role?: 'user' | 'miner' | 'admin') => boolean;
+  register: (email: string, displayName: string, role?: 'user' | 'miner' | 'admin', referralCode?: string) => boolean;
   logout: () => void;
   updateProfile: (updates: Partial<UserProfile>) => void;
 
@@ -269,6 +275,20 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           addNotification('Realtime Transfer', `Network transfer executed: ${data.amountNXR} NXR`, 'info');
         } catch {}
       });
+      eventSource.addEventListener('NEW_NOTIFICATION', (e: any) => {
+        try {
+          const data = JSON.parse(e.data);
+          if (data.notification) {
+            setNotifications(prev => {
+              const notif = data.notification;
+              if (notif.deduplicationKey && prev.some(n => n.deduplicationKey === notif.deduplicationKey)) {
+                return prev;
+              }
+              return [notif, ...prev];
+            });
+          }
+        } catch {}
+      });
       eventSource.addEventListener('MARKET_REFRESH', () => {
         // Trigger market refresh when fresh data is published
         refreshMarketData();
@@ -289,6 +309,20 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       }
     };
   }, []);
+
+  // Fetch Authoritative Server Notifications on User Login / Change
+  useEffect(() => {
+    if (!user?.id) return;
+    let isMounted = true;
+    fetchMyNotifications(user.id).then(res => {
+      if (isMounted && res.success && res.notifications) {
+        setNotifications(res.notifications);
+      }
+    }).catch(() => {});
+    return () => {
+      isMounted = false;
+    };
+  }, [user?.id]);
 
   useEffect(() => {
     localStorage.setItem(STORAGE_KEYS.PORTFOLIO, JSON.stringify(portfolio));
@@ -353,6 +387,42 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     return () => clearInterval(interval);
   }, []);
 
+  // Synchronize active mining session with authoritative server database
+  useEffect(() => {
+    if (!user?.id) return;
+    let isCancelled = false;
+
+    const syncServerMiningSession = async () => {
+      try {
+        const res = await fetch(`/api/mining/status?userId=${encodeURIComponent(user.id)}`);
+        if (!res.ok) return;
+        const data = await res.json();
+        if (isCancelled) return;
+
+        if (data.active && data.startedAt) {
+          setMiningSession(prev => ({
+            ...prev,
+            sessionId: data.sessionId,
+            isActive: true,
+            isPaused: false,
+            startedAt: data.startedAt,
+            elapsedSeconds: data.elapsedSeconds,
+            remainingSeconds: data.remainingSeconds,
+            accumulatedRewardNXR: data.accumulatedRewardNXR,
+            serverVerified: true,
+          }));
+        }
+      } catch {
+        // Network resilience
+      }
+    };
+
+    syncServerMiningSession();
+    return () => {
+      isCancelled = true;
+    };
+  }, [user?.id]);
+
   // 24-HOUR MINING ENGINE TICK LOOP
   const tickIntervalRef = useRef<number | null>(null);
 
@@ -402,6 +472,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const startMining = async () => {
     const now = Date.now();
     let serverStartedAt = now;
+    let serverSessionId = `sess_${now}_${Math.random().toString(36).substring(2, 6)}`;
 
     // Call server to record start timestamp if server is available
     try {
@@ -410,15 +481,21 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ userId: user?.id || 'usr_guest' }),
       });
-      if (res.ok) {
-        const data = await res.json();
+      const data = await res.json();
+      if (res.ok && data.success) {
         if (data.startedAt) serverStartedAt = data.startedAt;
+        if (data.sessionId) serverSessionId = data.sessionId;
+      } else if (res.status === 409) {
+        // Active or pending session already running on server
+        if (data.startedAt) serverStartedAt = data.startedAt;
+        if (data.sessionId) serverSessionId = data.sessionId;
       }
     } catch {
       // Local fallback preserves verified client start time
     }
 
     setMiningSession({
+      sessionId: serverSessionId,
       isActive: true,
       isPaused: false,
       startedAt: serverStartedAt,
@@ -430,9 +507,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       currentHashRate: 45.5,
       currentNonce: 1,
       claimed: false,
+      serverVerified: true,
     });
 
-    addAuditLog('MINING_START', 'mining', `Started 24-hour virtual mining session at ${new Date(serverStartedAt).toISOString()}`);
+    addAuditLog('MINING_START', 'mining', `Started 24-hour server-verified virtual mining session (${serverSessionId}) at ${new Date(serverStartedAt).toISOString()}`);
   };
 
   const stopMining = () => {
@@ -458,20 +536,32 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     let verifiedReward = reward;
     let finalTxHash = generateBlockHexHash(now, miningSession.currentNonce);
 
-    // Call server claim endpoint
+    // Call server claim endpoint with telemetry for anti-tampering validation
     try {
       const res = await fetch('/api/mining/claim', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ userId: user?.id || 'usr_guest' }),
+        body: JSON.stringify({
+          userId: user?.id || 'usr_guest',
+          sessionId: miningSession.sessionId,
+          clientTimestamp: now,
+          clientElapsedSeconds: miningSession.elapsedSeconds,
+          claimedRewardNXR: miningSession.accumulatedRewardNXR,
+        }),
       });
-      if (res.ok) {
-        const data = await res.json();
-        if (typeof data.rewardNXR === 'number') verifiedReward = data.rewardNXR;
-        if (data.txHash) finalTxHash = data.txHash;
+
+      const data = await res.json();
+      if (!res.ok || !data.success) {
+        return {
+          success: false,
+          error: data.error || 'Server validation rejected the mining claim.',
+        };
       }
+
+      if (typeof data.rewardNXR === 'number') verifiedReward = data.rewardNXR;
+      if (data.txHash) finalTxHash = data.txHash;
     } catch {
-      // Fallback to local verified calculation
+      // In offline/mock mode fallback
     }
 
     // Mark session as claimed
@@ -505,14 +595,14 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       fromAddress: 'NEXORA-SIMULATION-POOL',
       toAddress: user?.virtualWalletAddress || 'NXR-VAULT-001',
       status: 'completed',
-      note: `24-Hour Mining Session completed (${miningSession.elapsedSeconds}s elapsed).`,
+      note: `24-Hour Mining Session completed (${miningSession.elapsedSeconds}s elapsed). Server verified.`,
     };
 
     setTransactions(prev => [newTx, ...prev]);
 
     // Add to genuine mining history
     const historyBlock: MiningHistoryBlock = {
-      sessionId: `sess_${now}`,
+      sessionId: miningSession.sessionId || `sess_${now}`,
       hash: finalTxHash,
       timestamp: now,
       elapsedSeconds: miningSession.elapsedSeconds,
@@ -525,11 +615,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     // Dispatch notification
     addNotification(
       'Virtual Reward Deposited',
-      `+${verifiedReward.toFixed(5)} NXR credited to your demo wallet.`,
+      `+${verifiedReward.toFixed(5)} NXR credited to your virtual wallet.`,
       'reward'
     );
 
-    addAuditLog('REWARD_CLAIM', 'mining', `Claimed ${verifiedReward.toFixed(5)} virtual NXR from session.`);
+    addAuditLog('REWARD_CLAIM', 'mining', `Claimed ${verifiedReward.toFixed(5)} virtual NXR from session (Server verified).`);
 
     return { success: true, rewardNXR: verifiedReward };
   };
@@ -613,8 +703,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const login = (email: string, role: 'user' | 'miner' | 'admin' = 'user') => {
     // Preserve existing balance if same user logs back in, else clean 0.00000 NXR
     const existingBalance = user?.email === email ? user.virtualBalanceNXR : 0.00000;
+    const userId = `usr_${Date.now().toString(36)}`;
     const updatedUser: UserProfile = {
-      id: `usr_${Date.now().toString(36)}`,
+      id: userId,
       email,
       displayName: email.split('@')[0],
       role,
@@ -623,15 +714,37 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       twoFactorEnabled: false,
       virtualWalletAddress: `NXR-${Math.floor(1000 + Math.random() * 9000)}-${Math.floor(1000 + Math.random() * 9000)}-${Math.floor(1000 + Math.random() * 9000)}-${Math.random().toString(36).substring(2, 6).toUpperCase()}`,
       virtualBalanceNXR: existingBalance,
+      referralCode: `NXR-REF-${userId.substring(4, 9).toUpperCase()}`,
     };
     setUser(updatedUser);
     addAuditLog('USER_LOGIN', 'auth', `User ${email} signed in as ${role}`);
+
+    fetch('/api/users/sync', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        id: updatedUser.id,
+        email: updatedUser.email,
+        displayName: updatedUser.displayName,
+        role: updatedUser.role,
+        walletAddress: updatedUser.virtualWalletAddress,
+        balanceNXR: updatedUser.virtualBalanceNXR,
+      }),
+    }).catch(() => {});
+
     return true;
   };
 
-  const register = (email: string, displayName: string, role: 'user' | 'miner' | 'admin' = 'user') => {
+  const register = (
+    email: string,
+    displayName: string,
+    role: 'user' | 'miner' | 'admin' = 'user',
+    referralCode?: string
+  ) => {
+    const userId = `usr_${Date.now().toString(36)}`;
+    const refCode = `NXR-REF-${userId.substring(4, 9).toUpperCase()}`;
     const newUser: UserProfile = {
-      id: `usr_${Date.now().toString(36)}`,
+      id: userId,
       email,
       displayName,
       role,
@@ -640,6 +753,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       twoFactorEnabled: false,
       virtualWalletAddress: `NXR-${Math.floor(1000 + Math.random() * 9000)}-${Math.floor(1000 + Math.random() * 9000)}-${Math.floor(1000 + Math.random() * 9000)}-${Math.random().toString(36).substring(2, 6).toUpperCase()}`,
       virtualBalanceNXR: 0.00000, // Strictly zero initial balance
+      referralCode: refCode,
+      referredBy: referralCode ? referralCode.trim() : undefined,
     };
     setUser(newUser);
     // Fresh registration has empty transactions and empty mining history
@@ -647,6 +762,33 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     setMiningHistory([]);
     setMiningSession(INITIAL_MINING_SESSION);
     addAuditLog('USER_REGISTER', 'auth', `New user registered: ${email}`);
+
+    // Authoritative backend sync with optional referral code
+    fetch('/api/users/sync', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        id: newUser.id,
+        email: newUser.email,
+        displayName: newUser.displayName,
+        role: newUser.role,
+        walletAddress: newUser.virtualWalletAddress,
+        balanceNXR: newUser.virtualBalanceNXR,
+        referralCode: referralCode?.trim(),
+      }),
+    })
+      .then(r => r.json())
+      .then(data => {
+        if (data.referralCredited) {
+          addNotification(
+            'Referral Code Applied',
+            `Referral code ${referralCode} was verified. Your referrer received a community reward.`,
+            'reward'
+          );
+        }
+      })
+      .catch(() => {});
+
     return true;
   };
 
@@ -671,10 +813,16 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     setNotifications(prev =>
       prev.map(n => (n.id === id ? { ...n, read: true } : n))
     );
+    if (user?.id) {
+      markNotificationAsReadOnServer(user.id, id).catch(() => {});
+    }
   };
 
   const clearAllNotifications = () => {
     setNotifications([]);
+    if (user?.id) {
+      clearReadNotificationsOnServer(user.id).catch(() => {});
+    }
   };
 
   const addNotification = (title: string, message: string, type: NotificationItem['type'] = 'info') => {

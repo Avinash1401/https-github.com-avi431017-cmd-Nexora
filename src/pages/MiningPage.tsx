@@ -220,6 +220,24 @@ export const MiningPage: React.FC = () => {
             </div>
           </div>
 
+          {/* Server Database Verification & Anti-Clock Tampering Security Badge */}
+          <div className="flex flex-wrap items-center justify-between gap-2 p-3 rounded-xl bg-[#0F111D] border border-emerald-500/25 text-xs font-mono">
+            <div className="flex items-center gap-2 text-emerald-400">
+              <ShieldCheck className="w-4 h-4 text-emerald-400 shrink-0" />
+              <span className="font-semibold">Server DB Verification Active</span>
+              <span className="text-[10px] text-emerald-500/80 bg-emerald-500/10 px-1.5 py-0.5 rounded border border-emerald-500/20">Clock Tamper-Proof</span>
+            </div>
+            <div className="flex items-center gap-3 text-slate-400 text-[11px]">
+              {miningSession.sessionId && (
+                <span className="hidden sm:inline">Session: <span className="text-slate-300 font-bold">{miningSession.sessionId.substring(0, 16)}...</span></span>
+              )}
+              {miningSession.startedAt && (
+                <span>Started: <span className="text-[#ECC86A]">{new Date(miningSession.startedAt).toLocaleTimeString()}</span></span>
+              )}
+              <span className="text-amber-400 font-bold">24h Capped</span>
+            </div>
+          </div>
+
           {/* Linear Progress Bar */}
           <div className="space-y-2">
             <div className="flex items-center justify-between text-xs font-mono">
@@ -313,7 +331,7 @@ export const MiningPage: React.FC = () => {
               }`}
             >
               <Award className="w-4 h-4" />
-              <span>Claim +{formatNXR(accruedNXR)} NXR</span>
+              <span>Claim +{formatNXR(accruedNXR)}</span>
             </button>
           </div>
         </div>
@@ -331,13 +349,13 @@ export const MiningPage: React.FC = () => {
               <div className="flex items-center justify-between text-slate-400">
                 <span>Virtual NXR Balance:</span>
                 <span className="text-[#F3E5AB] font-bold text-sm">
-                  {formatNXR(user?.virtualBalanceNXR || 0)} NXR
+                  {formatNXR(user?.virtualBalanceNXR || 0)}
                 </span>
               </div>
               <div className="flex items-center justify-between text-slate-400">
                 <span>Total Mined All-Time:</span>
                 <span className="text-emerald-400 font-bold">
-                  {formatNXR(miningSession.totalEarnedAllTimeNXR ?? miningSession.totalNxrEarnedAllTime ?? 0)} NXR
+                  {formatNXR(miningSession.totalEarnedAllTimeNXR ?? miningSession.totalNxrEarnedAllTime ?? 0)}
                 </span>
               </div>
               <div className="flex items-center justify-between text-slate-400">

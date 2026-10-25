@@ -1,0 +1,9 @@
+User-agent: *
+Allow: /
+
+# Disallow internal API endpoints and admin prototype from crawling
+Disallow: /api/
+Disallow: /admin
+
+# Sitemap location
+Sitemap: https://ais-dev-h7pgqgdjgfvcst4btfexxf-685198115935.asia-southeast1.run.app/sitemap.xml

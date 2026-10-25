@@ -1,6 +1,6 @@
 import React from 'react';
 import { useApp } from '../../context/AppContext';
-import { LayoutDashboard, Pickaxe, TrendingUp, Wallet, PieChart } from 'lucide-react';
+import { LayoutDashboard, Pickaxe, TrendingUp, Wallet, Layers, User } from 'lucide-react';
 
 export const MobileBottomNav: React.FC = () => {
   const { activeTab, setActiveTab, miningSession } = useApp();
@@ -13,9 +13,9 @@ export const MobileBottomNav: React.FC = () => {
       icon: Pickaxe,
       badge: miningSession.isActive ? '●' : undefined,
     },
-    { id: 'market', label: 'Market', icon: TrendingUp },
-    { id: 'portfolio', label: 'Portfolio', icon: PieChart },
+    { id: 'transactions', label: 'Ledger', icon: Layers },
     { id: 'wallet', label: 'Wallet', icon: Wallet },
+    { id: 'account', label: 'Account', icon: User },
   ];
 
   return (

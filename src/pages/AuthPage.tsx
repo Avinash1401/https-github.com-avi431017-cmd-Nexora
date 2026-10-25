@@ -41,6 +41,8 @@ export const AuthPage: React.FC = () => {
   const [selectedRole, setSelectedRole] = useState<'user' | 'miner' | 'admin'>('user');
   const [showPassword, setShowPassword] = useState(false);
   const [copiedAddress, setCopiedAddress] = useState(false);
+  const [copiedRefCode, setCopiedRefCode] = useState(false);
+  const [referralCodeInput, setReferralCodeInput] = useState('');
 
   // Status feedback
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
@@ -86,7 +88,7 @@ export const AuthPage: React.FC = () => {
       return;
     }
 
-    register(email, displayName, selectedRole);
+    register(email, displayName, selectedRole, referralCodeInput);
     setAuthSuccessNotice(`Node account created for ${displayName}! Welcome to Nexora Coin.`);
     setTimeout(() => {
       setAuthSuccessNotice(null);
@@ -250,6 +252,27 @@ export const AuthPage: React.FC = () => {
                     aria-label="Copy Address"
                   >
                     {copiedAddress ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5" />}
+                  </button>
+                </div>
+              </div>
+              <div className="flex flex-col sm:flex-row sm:justify-between sm:items-center gap-1.5 pb-2.5 border-b border-slate-800/80">
+                <span className="text-slate-400 font-sans">Unique Referral Code:</span>
+                <div className="flex items-center gap-2">
+                  <span className="text-[#F3E5AB] font-bold font-mono">
+                    {user.referralCode || `NXR-REF-${user.id.substring(4, 9).toUpperCase()}`}
+                  </span>
+                  <button
+                    onClick={() => {
+                      const code = user.referralCode || `NXR-REF-${user.id.substring(4, 9).toUpperCase()}`;
+                      navigator.clipboard.writeText(code);
+                      setCopiedRefCode(true);
+                      setTimeout(() => setCopiedRefCode(false), 2000);
+                    }}
+                    className="p-1 rounded hover:bg-white/10 text-[#ECC86A] transition-colors"
+                    title="Copy Referral Code"
+                    aria-label="Copy Referral Code"
+                  >
+                    {copiedRefCode ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5" />}
                   </button>
                 </div>
               </div>
@@ -521,6 +544,25 @@ export const AuthPage: React.FC = () => {
                   className="w-full pl-9 pr-3 py-2.5 rounded-xl bg-[#151824] border border-slate-800 text-white placeholder-slate-600 focus:outline-none focus:border-[#D4AF37]"
                 />
               </div>
+            </div>
+
+            <div>
+              <label className="block text-slate-400 mb-1">
+                Referral Code <span className="text-slate-500 font-normal">(Optional)</span>
+              </label>
+              <div className="relative">
+                <Sparkles className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-[#ECC86A]" />
+                <input
+                  type="text"
+                  value={referralCodeInput}
+                  onChange={e => setReferralCodeInput(e.target.value.toUpperCase())}
+                  placeholder="e.g., NXR-REF-ADMIN"
+                  className="w-full pl-9 pr-3 py-2.5 rounded-xl bg-[#151824] border border-slate-800 text-white placeholder-slate-600 focus:outline-none focus:border-[#D4AF37] font-mono uppercase"
+                />
+              </div>
+              <p className="text-[10px] text-slate-500 mt-1">
+                Enter an existing node operator's referral code to link your account.
+              </p>
             </div>
 
             <div>
